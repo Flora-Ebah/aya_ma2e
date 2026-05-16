@@ -130,7 +130,7 @@ export default function KnowledgePage() {
   function startIngestion() {
     if (running) return;
     if (!url.trim()) {
-      toast({ tone: "error", title: "URL requise" });
+      toast({ tone: "error", title: "URL requise", message: "Veuillez saisir une URL avant de lancer l'ingestion." });
       return;
     }
 
@@ -228,7 +228,7 @@ export default function KnowledgePage() {
     try {
       await api.deleteKnowledgeSource(s.id);
       await load(selectedTenant);
-      toast({ tone: "info", title: "Source supprimée" });
+      toast({ tone: "info", title: "Source supprimée", message: "La source a été supprimée avec succès." });
     } catch (e: any) {
       toast({ tone: "error", title: "Erreur", message: e.message });
     }
