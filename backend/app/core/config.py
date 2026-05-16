@@ -51,6 +51,12 @@ class Settings(BaseSettings):
             self.database_url_sync = self.database_url.replace(
                 "postgresql+asyncpg://", "postgresql://"
             )
+        # Minio expects host:port only — strip any scheme or trailing slash
+        for scheme in ("https://", "http://"):
+            if self.minio_endpoint.startswith(scheme):
+                self.minio_endpoint = self.minio_endpoint[len(scheme):]
+                break
+        self.minio_endpoint = self.minio_endpoint.rstrip("/")
         return self
 
 

@@ -4,12 +4,19 @@ from minio.error import S3Error
 
 from app.core.config import settings
 
-_client = Minio(
-    settings.minio_endpoint,
-    access_key=settings.minio_access_key,
-    secret_key=settings.minio_secret_key,
-    secure=settings.minio_secure,
-)
+_client: Minio | None = None
+
+
+def _get_client() -> Minio:
+    global _client
+    if _client is None:
+        _client = Minio(
+            settings.minio_endpoint,
+            access_key=settings.minio_access_key,
+            secret_key=settings.minio_secret_key,
+            secure=settings.minio_secure,
+        )
+    return _client
 
 
 def tenant_bucket(tenant_slug: str) -> str:
@@ -19,8 +26,8 @@ def tenant_bucket(tenant_slug: str) -> str:
 def ensure_bucket(tenant_slug: str) -> str:
     name = tenant_bucket(tenant_slug)
     try:
-        if not _client.bucket_exists(name):
-            _client.make_bucket(name)
+        if not _get_client().bucket_exists(name):
+            _get_client().make_bucket(name)
     except S3Error:
         pass
     return name
@@ -29,14 +36,14 @@ def ensure_bucket(tenant_slug: str) -> str:
 def put_object(tenant_slug: str, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
     bucket = ensure_bucket(tenant_slug)
     stream = BytesIO(data)
-    _client.put_object(bucket, key, stream, length=len(data), content_type=content_type)
+    _get_client().put_object(bucket, key, stream, length=len(data), content_type=content_type)
     return f"minio://{bucket}/{key}"
 
 
 def get_presigned_url(tenant_slug: str, key: str, expires_seconds: int = 3600) -> str:
     from datetime import timedelta
     bucket = tenant_bucket(tenant_slug)
-    return _client.presigned_get_object(bucket, key, expires=timedelta(seconds=expires_seconds))
+    return _get_client().presigned_get_object(bucket, key, expires=timedelta(seconds=expires_seconds))
 
 
 def get_object_bytes_from_url(url: str) -> tuple[bytes, str]:
@@ -48,7 +55,7 @@ def get_object_bytes_from_url(url: str) -> tuple[bytes, str]:
         raise ValueError(f"not a minio url: {url!r}")
     rest = url[len("minio://"):]
     bucket, key = rest.split("/", 1)
-    response = _client.get_object(bucket, key)
+    response = _get_client().get_object(bucket, key)
     try:
         data = response.read()
     finally:
@@ -69,6 +76,6 @@ def presigned_from_minio_url(url: str, expires_seconds: int = 3600) -> str | Non
     except ValueError:
         return None
     try:
-        return _client.presigned_get_object(bucket, key, expires=timedelta(seconds=expires_seconds))
+        return _get_client().presigned_get_object(bucket, key, expires=timedelta(seconds=expires_seconds))
     except Exception:
         return None
