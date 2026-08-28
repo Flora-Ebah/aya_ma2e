@@ -218,14 +218,32 @@ async def has_permission(
 
 
 def _seal_audit_immutability(perms: dict, role: UserRole) -> dict:
-    """F-12 — la piste d'audit est append-only par conception.
+    """F-12 — la piste d'audit est strictement append-only, SANS EXCEPTION.
 
-    Aucun rôle sauf super_admin ne peut avoir `audit.write` ou `audit.delete`,
-    même si la matrice le prétend. Sécurité en profondeur : si un rôle métier
-    est mal configuré (write/delete audit à True), la matrice effective est
-    quand même verrouillée en lecture-seule.
+    Le rapport pentest v1.0 exige :
+      « Traiter la piste d'audit comme strictement immuable, sans exception
+        de rôle. »
+
+    Donc AUCUN rôle applicatif (super_admin inclus) ne peut avoir
+    `audit.write` ou `audit.delete`. Cette règle prime sur la matrice RBAC
+    en base : même si un rôle métier est mal configuré, `effective_permissions`
+    renvoie ces droits à False.
+
+    Break-glass : le setting `settings.audit_break_glass_enabled` permet
+    (uniquement en debug/incident majeur, jamais en prod) de restaurer les
+    droits pour `super_admin`. Cette exception :
+      - est explicitement contrôlée par une variable d'environnement
+      - est refusée en production (`APP_ENV=production`) par sécurité
+      - devrait être auditée hors bande si elle est activée
     """
-    if role == UserRole.super_admin:
+    from app.core.config import settings
+
+    break_glass = (
+        settings.audit_break_glass_enabled
+        and settings.app_env != "production"
+        and role == UserRole.super_admin
+    )
+    if break_glass:
         return perms
     if "audit" in perms:
         perms["audit"]["write"] = False

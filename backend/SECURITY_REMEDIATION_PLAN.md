@@ -113,20 +113,29 @@ En production (`APP_ENV=production`), les endpoints `/docs`, `/redoc` et `/opena
 
 Suppression complète du paramètre `token_qs: Optional[str] = Query(alias="token")` de `get_auth_context`. Seuls le cookie httpOnly `ma2e_token` et le header `Authorization: Bearer` sont acceptés. Le fallback query était un vestige de la Phase 1 et n'était plus référencé côté frontend (grep confirmé).
 
-### F-12 — Immuabilité du journal d'audit
+### F-12 — Immuabilité du journal d'audit (**durcissement 28/08 après audit de conformité**)
 
-**Fichier modifié** : `app/services/rbac_service.py`
+**Fichiers modifiés / créés** :
+- `app/services/rbac_service.py` — `_seal_audit_immutability` durci : par défaut AUCUN rôle applicatif n'a `audit.write`/`audit.delete`, y compris `super_admin`. La reco pentest exigeait « sans exception de rôle » — c'est désormais respecté à la lettre. Un mécanisme break-glass est disponible via `settings.audit_break_glass_enabled = True`, mais il est **refusé en production** (`APP_ENV=production`) et ne concerne que `super_admin` en dev/staging pour un incident majeur.
+- `app/core/config.py` — nouveau setting `audit_break_glass_enabled: bool = False`, documenté comme break-glass exceptionnel.
+- `app/bootstrap.py` — pose désormais un **trigger PostgreSQL append-only** sur `audit_logs` à l'initialisation. Fonction `ma2e_audit_append_only()` qui `RAISE EXCEPTION` (ERRCODE `insufficient_privilege`) sur tout `UPDATE`, `DELETE`, `TRUNCATE`. Défense en profondeur au niveau moteur BDD : même un accès psql direct (DBA, backup restoré, compte compromis) ne peut pas altérer la piste.
+- `backend/seeds/patch_prod_f12_audit_append_only.sql` (**nouveau**) — script idempotent pour installer le trigger sur les bases prod déjà déployées.
+- `backend/tests/test_rbac_audit_seal.py` (**nouveau**) — test de non-régression standalone (pas besoin de pytest) qui vérifie 11 assertions sur le comportement de `_seal_audit_immutability`. Exécution : `python -m tests.test_rbac_audit_seal`.
 
-Ajout de `_seal_audit_immutability(perms, role)` appliquée en sortie de `effective_permissions`. Cette fonction force `audit.write = False` et `audit.delete = False` pour tous les rôles sauf `super_admin`, quelle que soit la configuration en amont (défense en profondeur).
-
-**Comportement vérifié** :
+**Comportement vérifié** (avec `AUDIT_BREAK_GLASS_ENABLED=false`, le défaut prod) :
 
 | Rôle | audit.read | audit.write | audit.delete | audit.export |
 |---|---|---|---|---|
-| super_admin | ✅ | ✅ | ✅ | ✅ |
+| super_admin | ✅ | ❌ | ❌ | ✅ |
 | tenant_admin | ✅ | ❌ | ❌ | ✅ |
 | agent | ✅ | ❌ | ❌ | ✅ (selon rôle métier) |
 | viewer | ✅ | ❌ | ❌ | ❌ |
+
+**Aucune route API n'expose `write`/`update`/`delete` sur `/api/audit/*`** : le grep sur `app/api/audit.py` confirme uniquement 5 endpoints GET. La reco « accès en lecture seule » est structurellement respectée côté API.
+
+**Aucun code applicatif ne fait `db.delete(audit_log)` ni équivalent**, vérifié par grep sur tout `app/`.
+
+**Impossible d'altérer la piste même en SQL direct** : les 3 triggers BDD refusent toute mutation, indépendamment du rôle PostgreSQL utilisé pour la connexion.
 
 ### F-02 — Contrôle RBAC uniformisé sur les exports
 
@@ -237,3 +246,4 @@ Après clôture des Sprints 1 et 2, demander à l'équipe Sécurité Opérationn
 | 1.1 | 28/08/2026 | Flora EBAH | Sprint 2 livré : F-02 (RBAC exports), F-06 (saisie utilisateur préservée, priority_review), F-10 (simulate admin-only). Progression 7/13. |
 | 1.2 | 28/08/2026 | Flora EBAH | Sprint 3 livré : F-08 (headers anonymisés), F-09 (placeholder discret), F-11 (ValidationError → 400). Progression 10/13 — reste F-01 (sprint dédié) et F-03 (arbitrage). |
 | 1.3 | 28/08/2026 | Flora EBAH | Sprint dédié F-01 livré : ocr_guardrails (system prompt anti-injection + wrap nonce + sanitize), response_format json_object forcé, hardening upload web (allowlist MIME + 5 MB max), rate-limit IP sur webhooks/web. Progression 12/13 — reste uniquement F-03 (arbitrage produit). |
+| 1.4 | 28/08/2026 | Flora EBAH | Durcissement F-12 après audit de conformité : super_admin verrouillé aussi (« sans exception de rôle »), trigger PostgreSQL append-only sur `audit_logs`, patch SQL prod idempotent, test de non-régression (11 asserts). Écart résiduel avec la reco pentest : zéro. |

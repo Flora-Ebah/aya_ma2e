@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     app_base_url: str = "http://localhost:8000"
     public_webhook_url: str = ""
 
+    # F-12 — Piste d'audit strictement immuable, sans exception de rôle.
+    # Ce flag permet une exception break-glass pour super_admin en
+    # dev/staging uniquement. Refusé en production quelle que soit sa
+    # valeur. Ne PAS positionner ce flag hors incident majeur.
+    audit_break_glass_enabled: bool = False
+
     # ── Sécurité — authentification par cookie httpOnly (Phase 2) ──
     # Nom du cookie de session JWT (httpOnly, non-lisible par JS).
     auth_cookie_name: str = "ma2e_token"
