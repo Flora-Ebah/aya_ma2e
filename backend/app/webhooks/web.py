@@ -16,7 +16,8 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.conversation import state_machine
+from app.conversation import dispatcher
+from app.conversation import utils as conv_utils
 from app.core.database import get_db
 from app.core.storage import put_object
 from app.models import Channel, MessageDirection, Tenant
@@ -49,10 +50,10 @@ async def web_chat(
     if not tenant:
         raise HTTPException(status_code=404, detail="tenant not found")
 
-    end_user = await state_machine.get_or_create_end_user(
+    end_user = await conv_utils.get_or_create_end_user(
         db, tenant.id, Channel.web, payload.session_id, payload.name
     )
-    conversation = await state_machine.get_or_create_conversation(
+    conversation = await conv_utils.get_or_create_conversation(
         db, tenant.id, end_user, Channel.web
     )
 
@@ -61,12 +62,12 @@ async def web_chat(
         payload.session_id, end_user.id, conversation.id, conversation.state, payload.message,
     )
 
-    await state_machine.record_message(
+    await conv_utils.record_message(
         db, tenant.id, conversation, MessageDirection.inbound,
         content=payload.message, media_url=payload.media_url,
     )
 
-    reply = await state_machine.handle_message(
+    reply = await dispatcher.dispatch(
         db=db,
         tenant=tenant,
         conversation=conversation,
@@ -81,7 +82,7 @@ async def web_chat(
         conversation.id, conversation.state, reply.text[:60],
     )
 
-    await state_machine.record_message(
+    await conv_utils.record_message(
         db, tenant.id, conversation, MessageDirection.outbound, content=reply.text,
     )
     await db.commit()
@@ -93,6 +94,28 @@ async def web_chat(
         session_id=payload.session_id,
         state=conversation.state,
     )
+
+
+# F-01 — canal anonyme : le pentest a démontré qu'un attaquant peut
+# forger une pièce d'identité malveillante et la pusher via cet endpoint.
+# On ferme la surface d'attaque par :
+#   - allowlist MIME stricte (image bitmap uniquement, pas de PDF ni SVG)
+#   - allowlist extension côté filename (défense en profondeur)
+#   - taille max 5 MB (une photo CNI compressée fait 200-800 KB)
+#   - rate-limit strict par IP (défini dans app/core/rate_limit.py)
+_ALLOWED_UPLOAD_MIME: frozenset[str] = frozenset({
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/heic",
+    "image/heif",
+    "image/webp",
+})
+_ALLOWED_UPLOAD_EXT: frozenset[str] = frozenset({
+    ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp",
+})
+_MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5 MB
+_MAX_FILENAME_LEN = 128
 
 
 @router.post("/upload/{tenant_slug}")
@@ -109,21 +132,44 @@ async def upload_media(
 
     if not file.filename:
         raise HTTPException(status_code=400, detail="no file provided")
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="empty file")
+    if len(file.filename) > _MAX_FILENAME_LEN:
+        raise HTTPException(status_code=400, detail="filename too long")
+
+    # F-01 — allowlist MIME (déclarée par le client + extension file)
+    mime = (file.content_type or "").lower()
+    if mime and mime not in _ALLOWED_UPLOAD_MIME:
+        logger.warning(
+            "upload rejected: unsupported mime=%r tenant=%s session=%s",
+            mime, tenant.slug, session_id,
+        )
+        raise HTTPException(status_code=415, detail="unsupported media type")
 
     ext = ""
     if "." in file.filename:
         ext = "." + file.filename.rsplit(".", 1)[1].lower()
+    if ext and ext not in _ALLOWED_UPLOAD_EXT:
+        raise HTTPException(status_code=415, detail="unsupported file extension")
+
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="empty file")
+
+    # F-01 — plafond de taille strict
+    if len(contents) > _MAX_UPLOAD_BYTES:
+        logger.warning(
+            "upload rejected: too large %d bytes (max %d) tenant=%s session=%s",
+            len(contents), _MAX_UPLOAD_BYTES, tenant.slug, session_id,
+        )
+        raise HTTPException(status_code=413, detail="file too large (5 MB max)")
+
     key = f"web/{session_id}/{uuid_lib.uuid4()}{ext}"
     storage_url = put_object(
-        tenant.slug, key, contents, content_type=file.content_type or "application/octet-stream"
+        tenant.slug, key, contents, content_type=mime or "application/octet-stream"
     )
 
     return {
         "media_url": storage_url,
         "filename": file.filename,
         "size_bytes": len(contents),
-        "content_type": file.content_type,
+        "content_type": mime or None,
     }

@@ -10,9 +10,14 @@ import json
 import logging
 from typing import Optional
 
-from app.conversation import llm
+from app.conversation import llm, llm_azure
 from app.core.config import settings
 from app.models import PieceFace, PieceType
+from app.services.ocr_guardrails import (
+    SYSTEM_PROMPT_ID_EXTRACTION,
+    build_user_message,
+    sanitize_extracted_fields,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +83,8 @@ async def _structure_with_llm(raw_text: str, face: PieceFace) -> dict:
         return {"fields": {}, "mrz": {}}
 
     if face == PieceFace.recto:
-        prompt = (
-            "Voici le texte OCR du RECTO d'une pièce d'identité africaine "
-            "(probablement une CNI ivoirienne UEMOA, ou une carte consulaire / résident).\n\n"
-            f"```\n{raw_text}\n```\n\n"
-            "Extrais les champs en JSON STRICT. Format de réponse OBLIGATOIRE :\n"
-            '{\n'
+        schema_hint = (
+            "{\n"
             '  "fields": {\n'
             '    "numero_piece": "..." ou null,\n'
             '    "nom": "..." ou null,\n'
@@ -94,68 +95,52 @@ async def _structure_with_llm(raw_text: str, face: PieceFace) -> dict:
             '    "nationalite": "Ivoirienne" ou autre,\n'
             '    "date_delivrance": "YYYY-MM-DD" ou null,\n'
             '    "date_expiration": "YYYY-MM-DD" ou null\n'
-            '  }\n'
-            '}\n\n'
-            "Règles strictes :\n"
-            "- Ne retourne RIEN d'autre que le JSON.\n"
-            "- Dates au format ISO YYYY-MM-DD obligatoire.\n"
-            "- N'invente RIEN ; si un champ est absent ou illisible → null.\n"
-            "- Le 'nom' est le nom de famille, les 'prenoms' sont les prénoms.\n"
+            "  }\n"
+            "}"
         )
     else:
-        prompt = (
-            "Voici le texte OCR du VERSO d'une pièce d'identité (souvent avec une zone MRZ — "
-            "lignes de codes en bas selon ICAO 9303).\n\n"
-            f"```\n{raw_text}\n```\n\n"
-            "Extrais MRZ et autres champs en JSON STRICT :\n"
-            '{\n'
+        schema_hint = (
+            "{\n"
             '  "mrz": {\n'
-            '    "line1": "..." ou "",\n'
-            '    "line2": "..." ou "",\n'
-            '    "line3": "..." ou "",\n'
+            '    "line1": "", "line2": "", "line3": "",\n'
             '    "parsed": {\n'
-            '      "document_type": "I",\n'
-            '      "issuing_country": "CIV" ou ...,\n'
-            '      "document_number": "..." ou null,\n'
-            '      "nom": "..." ou null,\n'
-            '      "prenoms": "..." ou null,\n'
+            '      "document_type": "I", "issuing_country": "CIV",\n'
+            '      "document_number": null, "nom": null, "prenoms": null,\n'
             '      "sexe": "M" ou "F" ou null,\n'
             '      "date_naissance_iso": "YYYY-MM-DD" ou null,\n'
             '      "date_expiration_iso": "YYYY-MM-DD" ou null,\n'
-            '      "nationalite": "CIV" ou ...\n'
-            '    }\n'
-            '  },\n'
-            '  "fields": {\n'
-            '    "adresse": "..." ou null,\n'
-            '    "signature_presente": true\n'
-            '  }\n'
-            '}\n\n'
-            "Règles strictes :\n"
-            "- Ne retourne RIEN d'autre que le JSON.\n"
-            "- Les lignes MRZ sont sur 1 à 3 lignes ; copie-les telles quelles.\n"
-            "- N'invente rien ; si un champ manque → null ou ''."
+            '      "nationalite": "CIV"\n'
+            "    }\n"
+            "  },\n"
+            '  "fields": {"adresse": null, "signature_presente": true}\n'
+            "}"
         )
 
-    system = (
-        "Tu es un extracteur d'identité strict. Tu reçois un texte OCR brut "
-        "et tu retournes UNIQUEMENT un objet JSON valide, sans aucun commentaire."
-    )
-
+    # F-01 — pipeline structuré : system_prompt anti-injection immuable,
+    # texte OCR encapsulé dans <ocr_text> nonce-scellé, sortie JSON forcée.
     try:
-        raw = await llm.chat_complete(system_prompt=system, user_message=prompt)
+        parsed = await llm_azure.structured_output(
+            system_prompt=SYSTEM_PROMPT_ID_EXTRACTION,
+            user_message=build_user_message(schema_hint, raw_text),
+            max_tokens=2048,
+        )
     except Exception as e:
         logger.error("LLM extraction a échoué : %s", e)
         return {"fields": {}, "mrz": {}}
 
     try:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end <= start:
-            return {"fields": {}, "mrz": {}}
-        parsed = json.loads(raw[start : end + 1])
+        # F-01 — sanitize post-extraction pour bloquer les injections qui
+        # auraient franchi le filtre côté LLM.
+        raw_fields = parsed.get("fields") if isinstance(parsed, dict) else {}
+        clean_fields, warnings = sanitize_extracted_fields(raw_fields or {})
+        if warnings:
+            logger.warning("OCR sanitize warnings (%s) : %s", face.value, warnings)
+        if isinstance(parsed, dict):
+            parsed["fields"] = clean_fields
+            parsed["_guardrails_warnings"] = warnings
         return parsed
-    except json.JSONDecodeError as e:
-        logger.warning("Réponse LLM non parsable : %s | raw=%r", e, raw[:200])
+    except Exception as e:
+        logger.warning("Réponse LLM non parsable : %s | parsed=%r", e, str(parsed)[:200])
         return {"fields": {}, "mrz": {}}
 
 
