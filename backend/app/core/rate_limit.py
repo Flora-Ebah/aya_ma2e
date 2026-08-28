@@ -82,6 +82,14 @@ RULES: list[RateRule] = [
     _rule("POST", r"^/api/otp/send$",
           limit=3, window=60, label="otp_send"),
 
+    # F-10 — Simulation de workflow. L'endpoint est admin-only depuis le fix
+    # initial, mais l'impact pentest signale un risque de "charge sur le
+    # serveur" par appel répété (chaque simulate lance le workflow_executor).
+    # 30 simulations / 5 min / user est confortable pour un usage éditorial
+    # légitime (test itératif d'un parcours) et coupe court à l'abus.
+    _rule("POST", r"^/api/workflows/[^/]+/simulate$",
+          limit=30, window=300, label="workflow_simulate"),
+
     # F-01 — Upload media web anonyme (canal /webhooks/web/upload/{slug}).
     # Le pentest a signalé qu'un attaquant pouvait pusher des fichiers OCR
     # forgés sans limite. 20 uploads / 10 min / IP couvre l'usage nominal

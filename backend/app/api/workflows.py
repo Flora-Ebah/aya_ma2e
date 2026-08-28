@@ -366,7 +366,13 @@ async def list_registered_actions(
     """Retourne la liste des `action_name` enregistrés côté backend.
 
     Utile pour proposer une auto-complétion dans l'éditeur de step.
+
+    F-10 (cohérence) — l'éditeur de workflow est un outil d'administration.
+    Exposer le catalogue des actions à un viewer permet de cartographier la
+    logique interne (au même titre que le simulate). Soumis au même contrôle
+    de rôle que les autres endpoints d'action de workflow.
     """
+    _require_admin(ctx)
     return list_actions()
 
 
@@ -389,5 +395,8 @@ async def list_registered_actions_detailed(
     - regrouper visuellement les actions par catégorie (Identification, OCR, OTP…)
     - afficher le service associé + son état d'activation
     - proposer les branch_keys déjà connues quand l'admin ajoute une branche
+
+    F-10 (cohérence) — même contrôle admin que `/_meta/actions`.
     """
+    _require_admin(ctx)
     return list_actions_detailed()
