@@ -302,6 +302,23 @@ def _should_show_escape_hint(step: WorkflowStep, context: dict) -> bool:
     return True
 
 
+# F-09 — Un nom de variable interne (`{ocr_extracted_name}`, `{support_phone}`,
+# etc.) ne doit JAMAIS fuiter vers l'utilisateur. Le regex matche uniquement
+# les identifiants Python valides pour ne pas fusiller les accolades légitimes
+# (JSON échantillon, code, snippets techniques).
+_LEAKED_TOKEN_RE = re.compile(r"\{[a-zA-Z_][a-zA-Z0-9_]{0,63}\}")
+
+
+def _scrub_leaked_tokens(text: str) -> str:
+    """Remplace tout token `{xxx}` résiduel par un tiret discret.
+
+    Défense en profondeur : même si `format_map` a échoué (accolade
+    orpheline, JSON dans le template, brace non fermée) et laissé
+    passer un identifiant en clair, on l'efface avant renvoi.
+    """
+    return _LEAKED_TOKEN_RE.sub("—", text)
+
+
 async def _render_or_fallback(
     db: AsyncSession,
     tenant_id: UUID,
@@ -313,6 +330,10 @@ async def _render_or_fallback(
     Ajoute automatiquement le rappel des mots-clés universels (MENU / STOP /
     ANNULER / RECOMMENCER) en bas de chaque question — sauf sur les steps de
     démarrage qui sont déjà des menus.
+
+    F-09 — tous les chemins de retour passent par `_scrub_leaked_tokens` :
+    aucun `{xxx}` ne peut atteindre l'utilisateur, même quand `format_map`
+    lève une exception ou quand le template contient des accolades JSON.
     """
     template_code = step.template_code or workflow_template_service.derive_code(step.code)
     sys_vars = await _system_variables(db, tenant_id)
@@ -326,6 +347,7 @@ async def _render_or_fallback(
             body = raw.format_map(_SafeDict(variables))
         except Exception:
             body = raw
+        body = _scrub_leaked_tokens(body)
         if _should_show_escape_hint(step, context):
             body = body + ESCAPE_HINT
         return body
@@ -337,6 +359,7 @@ async def _render_or_fallback(
                 db, tenant_id=tenant_id, code=step.template_code, variables=variables,
             )
             if content:
+                content = _scrub_leaked_tokens(content)
                 if _should_show_escape_hint(step, context):
                     content = content + ESCAPE_HINT
                 return content
@@ -347,7 +370,7 @@ async def _render_or_fallback(
             )
 
     # 3) Fallback ultime : libellé entre crochets
-    fallback = f"[{step.label}]"
+    fallback = f"[{_scrub_leaked_tokens(step.label or '')}]"
     if _should_show_escape_hint(step, context):
         fallback += ESCAPE_HINT
     return fallback
