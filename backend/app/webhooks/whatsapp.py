@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import logging
 from typing import Optional
 
@@ -5,7 +7,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.conversation import state_machine
+from app.conversation import dispatcher
+from app.conversation import utils as conv_utils
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.storage import put_object
@@ -14,6 +17,26 @@ from app.models import Channel, MessageDirection
 
 router = APIRouter(prefix="/webhooks/whatsapp", tags=["webhooks"])
 logger = logging.getLogger(__name__)
+
+
+def _verify_meta_signature(raw_body: bytes, signature_header: Optional[str]) -> bool:
+    """F-04 — vérifie X-Hub-Signature-256 avec l'App Secret Meta.
+
+    Meta signe chaque webhook avec HMAC-SHA256(app_secret, raw_body). Un
+    attaquant sans le secret ne peut pas reproduire la signature. Utilise
+    hmac.compare_digest pour éviter les timing attacks.
+    """
+    secret = settings.whatsapp_app_secret
+    if not secret:
+        # Dev-friendly : pas de secret configuré → on laisse passer avec
+        # un avertissement. En prod, l'appelant refuse plus haut si vide.
+        logger.warning("WHATSAPP_APP_SECRET absent — signature webhook non vérifiée (mode dev)")
+        return True
+    if not signature_header or not signature_header.startswith("sha256="):
+        return False
+    provided = signature_header.split("=", 1)[1].strip().lower()
+    expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(provided, expected)
 
 
 @router.get("")
@@ -30,7 +53,22 @@ async def whatsapp_verify(
 
 @router.post("")
 async def whatsapp_webhook(request: Request, db: AsyncSession = Depends(get_db)):
-    payload = await request.json()
+    # F-04 : refuse tout webhook non signé par Meta. En prod sans secret
+    # configuré → 500 explicite plutôt que d'accepter n'importe quel POST.
+    if settings.app_env == "production" and not settings.whatsapp_app_secret:
+        logger.error("WHATSAPP_APP_SECRET absent en production — webhook refusé")
+        raise HTTPException(status_code=503, detail="webhook signature not configured")
+    raw = await request.body()
+    signature = request.headers.get("x-hub-signature-256")
+    if not _verify_meta_signature(raw, signature):
+        logger.warning("Webhook WhatsApp: signature invalide ou absente (from %s)",
+                       request.client.host if request.client else "?")
+        raise HTTPException(status_code=401, detail="invalid signature")
+    import json
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid JSON")
     try:
         entry = payload["entry"][0]
         change = entry["changes"][0]
@@ -58,10 +96,10 @@ async def whatsapp_webhook(request: Request, db: AsyncSession = Depends(get_db))
     contacts = value.get("contacts", [])
     name = contacts[0]["profile"]["name"] if contacts else None
 
-    end_user = await state_machine.get_or_create_end_user(
+    end_user = await conv_utils.get_or_create_end_user(
         db, tenant.id, Channel.whatsapp, from_phone, name
     )
-    conversation = await state_machine.get_or_create_conversation(
+    conversation = await conv_utils.get_or_create_conversation(
         db, tenant.id, end_user, Channel.whatsapp
     )
 
@@ -86,20 +124,20 @@ async def whatsapp_webhook(request: Request, db: AsyncSession = Depends(get_db))
         has_media = True
         text = msg.get("caption", "")
 
-    await state_machine.record_message(
+    await conv_utils.record_message(
         db, tenant.id, conversation, MessageDirection.inbound,
         content=text, media_url=media_url,
         extra={"whatsapp_message_id": msg.get("id")},
     )
 
-    reply = await state_machine.handle_message(
+    reply = await dispatcher.dispatch(
         db=db, tenant=tenant, conversation=conversation, end_user=end_user,
         text=text, has_media=has_media, media_url=media_url,
     )
 
     if reply.text and access_token:
         await _send_whatsapp_message(access_token, phone_number_id, from_phone, reply.text)
-        await state_machine.record_message(
+        await conv_utils.record_message(
             db, tenant.id, conversation, MessageDirection.outbound,
             content=reply.text,
         )

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.tenancy import AuthContext, get_auth_context, tenant_filter
+from app.services import rbac_service
 from app.models import (
     AuditAction,
     AuditLog,
@@ -89,6 +90,98 @@ async def audit_stats(
         )
     ).all()
     return {"total": sum(c for _, c in rows), "by_action": {a.value: c for a, c in rows}}
+
+
+@router.get("/logs/export.csv")
+async def export_audit_csv(
+    tenant_id: Optional[UUID] = Query(None),
+    action: Optional[str] = Query(None),
+    actor_type: Optional[str] = Query(None),
+    since: Optional[datetime] = Query(None),
+    until: Optional[datetime] = Query(None),
+    limit: int = Query(default=50000, ge=1, le=200000),
+    db: AsyncSession = Depends(get_db),
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Export CSV du journal d'audit (US-27 règle métier).
+
+    Encodage UTF-8 avec BOM (compatible Excel). Audité via `data_export`.
+
+    F-02 — la permission `audit.export` est requise. Un compte en lecture
+    seule (viewer) n'a pas ce droit et reçoit 403.
+    """
+    await rbac_service.require_permission(db, ctx, "audit", "export")
+
+    import csv
+    import io
+    from fastapi.responses import StreamingResponse
+
+    target = tenant_filter(ctx, tenant_id)
+    stmt = (
+        select(AuditLog)
+        .where(AuditLog.tenant_id == target)
+        .order_by(desc(AuditLog.created_at))
+        .limit(limit)
+    )
+    if action:
+        stmt = stmt.where(AuditLog.action == AuditAction(action))
+    if actor_type:
+        stmt = stmt.where(AuditLog.actor_type == actor_type)
+    if since:
+        stmt = stmt.where(AuditLog.created_at >= since)
+    if until:
+        stmt = stmt.where(AuditLog.created_at <= until)
+
+    rows = list((await db.execute(stmt)).scalars().all())
+
+    buf = io.StringIO()
+    buf.write("﻿")  # BOM UTF-8 pour Excel
+    writer = csv.writer(buf, delimiter=";")
+    writer.writerow([
+        "id", "created_at_utc", "actor_type", "actor_id", "ip_address",
+        "user_agent", "action", "resource_type", "resource_id",
+        "details", "entry_hash", "previous_hash",
+    ])
+    import json
+    for r in rows:
+        writer.writerow([
+            str(r.id),
+            r.created_at.isoformat() if r.created_at else "",
+            r.actor_type or "",
+            r.actor_id or "",
+            r.ip_address or "",
+            (r.user_agent or "")[:256],
+            r.action.value if r.action else "",
+            r.resource_type or "",
+            r.resource_id or "",
+            json.dumps(r.details, ensure_ascii=False, sort_keys=True),
+            r.entry_hash or "",
+            r.previous_hash or "",
+        ])
+
+    # Audit du téléchargement (US-25 règle pour les exports sensibles)
+    from app.services import audit_service
+    await audit_service.log(
+        db, tenant_id=target, action=AuditAction.data_export,
+        resource_type="audit_log_export", resource_id="csv",
+        actor_type="user", actor_id=str(ctx.user_id),
+        details={
+            "rows_exported": len(rows),
+            "filter_action": action,
+            "filter_actor_type": actor_type,
+            "filter_since": since.isoformat() if since else None,
+            "filter_until": until.isoformat() if until else None,
+        },
+    )
+    await db.commit()
+
+    buf.seek(0)
+    filename = f"audit_logs_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ----------------------------------------------------------------------
