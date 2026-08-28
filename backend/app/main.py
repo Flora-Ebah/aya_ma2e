@@ -50,7 +50,13 @@ async def lifespan(app: FastAPI):
 # F-05 : la doc API interactive est retirée en production pour ne pas
 # divulguer la surface d'attaque à un visiteur anonyme. Elle reste
 # disponible en dev/staging pour l'équipe.
-_IS_PROD = settings.app_env == "production"
+#
+# La détection tolère les variantes courantes (production/prod/PROD/Production)
+# pour éviter qu'une variable d'env mal saisie ne réactive silencieusement
+# Swagger en prod. Toute valeur reconnue déclenche le kill-switch ; toute
+# autre valeur est considérée comme dev/staging.
+_PROD_ENV_ALIASES = {"production", "prod", "prd"}
+_IS_PROD = (settings.app_env or "").strip().lower() in _PROD_ENV_ALIASES
 
 app = FastAPI(
     title="MA2E - Plateforme Digitale d'Identification",
@@ -288,12 +294,11 @@ app.include_router(whatsapp_webhook.router)
 
 @app.get("/")
 async def root():
-    return {
-        "service": "ma2e-identification-platform",
-        "env": settings.app_env,
-        "status": "ok",
-        "version": app.version,
-    }
+    # F-05 (cohérence) — on ne divulgue plus `app_env` ni `version` à un
+    # visiteur anonyme sur la racine. Un attaquant en reconnaissance ne
+    # doit pas pouvoir distinguer dev de prod ni cartographier les
+    # versions à partir d'un GET / non authentifié.
+    return {"service": "ma2e-identification-platform", "status": "ok"}
 
 
 @app.get("/health")
