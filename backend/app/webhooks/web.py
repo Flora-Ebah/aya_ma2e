@@ -11,19 +11,75 @@ Response: {"media_url": "...", "filename": "..."}
 import logging
 import uuid as uuid_lib
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.conversation import dispatcher
 from app.conversation import utils as conv_utils
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.storage import put_object
 from app.models import Channel, MessageDirection, Tenant
 
 router = APIRouter(prefix="/webhooks/web", tags=["webhooks"])
 logger = logging.getLogger(__name__)
+
+
+def _allowed_origins() -> set[str]:
+    """Parse la liste des origines autorisées depuis les settings."""
+    raw = settings.web_channel_allowed_origins or ""
+    return {o.strip().rstrip("/") for o in raw.split(",") if o.strip()}
+
+
+def _enforce_origin_control(request: Request) -> None:
+    """F-04 (cohérence) — contrôle d'origine pour le canal web anonyme.
+
+    Le pentester a recommandé d'appliquer le même contrôle d'origine à
+    TOUS les canaux d'intake, pas seulement WhatsApp. Le canal web est
+    ouvert au public (chat widget), donc on ne peut pas exiger une
+    signature HMAC comme Meta. À la place, on vérifie l'en-tête
+    `Origin` (posé automatiquement par le navigateur sur les POST) et
+    le fallback `Referer` contre une allowlist configurée.
+
+    En prod avec allowlist configurée : origine non listée → 403.
+    En prod sans allowlist : refuse pour forcer l'ops à configurer.
+    En dev sans allowlist : laisse passer avec un warning.
+    """
+    allowed = _allowed_origins()
+    if not allowed:
+        if settings.app_env == "production":
+            logger.error(
+                "WEB_CHANNEL_ALLOWED_ORIGINS absent en production — canal web refusé"
+            )
+            raise HTTPException(
+                status_code=503, detail="web channel origin control not configured"
+            )
+        logger.warning(
+            "WEB_CHANNEL_ALLOWED_ORIGINS absent — contrôle d'origine désactivé (mode dev)"
+        )
+        return
+
+    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    if not origin:
+        # Fallback sur Referer (préfixe uniquement, on ne compare pas le path)
+        referer = (request.headers.get("referer") or "").strip()
+        if referer:
+            # Extrait scheme://host de l'URL
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(referer)
+                origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            except Exception:
+                origin = ""
+
+    if origin not in allowed:
+        logger.warning(
+            "Web webhook: origine refusée '%s' (from %s)",
+            origin, request.client.host if request.client else "?",
+        )
+        raise HTTPException(status_code=403, detail="origin not allowed")
 
 
 class WebChatRequest(BaseModel):
@@ -43,8 +99,11 @@ class WebChatResponse(BaseModel):
 async def web_chat(
     tenant_slug: str,
     payload: WebChatRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    # F-04 (cohérence) — contrôle d'origine appliqué à tous les canaux d'intake.
+    _enforce_origin_control(request)
     stmt = select(Tenant).where(Tenant.slug == tenant_slug, Tenant.is_active.is_(True))
     tenant = (await db.execute(stmt)).scalar_one_or_none()
     if not tenant:
@@ -121,10 +180,13 @@ _MAX_FILENAME_LEN = 128
 @router.post("/upload/{tenant_slug}")
 async def upload_media(
     tenant_slug: str,
+    request: Request,
     session_id: str = Form(...),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ):
+    # F-04 (cohérence) — contrôle d'origine appliqué à tous les canaux d'intake.
+    _enforce_origin_control(request)
     stmt = select(Tenant).where(Tenant.slug == tenant_slug, Tenant.is_active.is_(True))
     tenant = (await db.execute(stmt)).scalar_one_or_none()
     if not tenant:

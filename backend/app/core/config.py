@@ -42,6 +42,20 @@ class Settings(BaseSettings):
     # (dev-friendly). En prod, l'absence de secret refuse TOUS les webhooks.
     whatsapp_app_secret: str = ""
 
+    # F-04 (cohérence) — Telegram Bot API accepte un `secret_token` optionnel
+    # posé par Telegram dans l'en-tête `X-Telegram-Bot-Api-Secret-Token`
+    # (méthode moderne recommandée par Telegram). Vide en dev → warning et
+    # laisse passer. En prod, absence de secret → 503.
+    telegram_webhook_secret: str = ""
+
+    # F-04 (cohérence) — Contrôle d'origine pour le canal web anonyme.
+    # Liste séparée par des virgules des origines HTTP autorisées à poster
+    # sur /webhooks/web/*. Vide en dev → laisse passer. En prod, une origine
+    # non listée reçoit 403.
+    #
+    # Exemple prod : "https://ma2e.swedencentral.cloudapp.azure.com"
+    web_channel_allowed_origins: str = ""
+
     # ====================================================================== #
     # Azure OpenAI — Chat (gpt-5.4-mini ou autre déploiement)
     # Endpoint sur le format `https://<resource>.cognitiveservices.azure.com/`
