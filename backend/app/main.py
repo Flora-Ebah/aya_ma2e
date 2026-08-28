@@ -73,14 +73,26 @@ def _extract_client_ip(request: Request) -> str:
 
 
 def _extract_user_id_from_jwt(request: Request) -> str | None:
-    """Décodage léger du JWT (sans DB) pour identifier l'utilisateur. Best-effort."""
+    """Décodage léger du JWT (sans DB) pour identifier l'utilisateur. Best-effort.
+
+    F-07 — la reco pentest exige de proscrire le passage du jeton en
+    paramètre d'URL sur TOUS les endpoints, y compris les usages non-auth.
+    Cette fonction est utilisée par le middleware de rate-limit pour
+    bucketer par `user_id` plutôt que par IP quand l'utilisateur est
+    connu. On lit uniquement le header Authorization et le cookie
+    httpOnly `ma2e_token` ; le fallback `?token=` a été retiré. Si aucun
+    token n'est présent, le bucket retombera automatiquement sur `ip:`
+    (rate-limit avec key_strategy `user_or_ip`).
+    """
     auth = request.headers.get("authorization") or ""
-    token = None
+    token: str | None = None
     if auth.startswith("Bearer "):
         token = auth[7:]
     else:
-        # Fallback query string (utilisé par les exports téléchargés via <a href>)
-        token = request.query_params.get("token")
+        # F-07 — plus de fallback query string. On lit le cookie httpOnly
+        # `ma2e_token` pour continuer à bucketer par user_id sur les
+        # sessions cookie-only (mode nominal Phase 2).
+        token = request.cookies.get(settings.auth_cookie_name)
     if not token:
         return None
     try:
