@@ -11,6 +11,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.query_validators import try_enum
 from app.core.tenancy import AuthContext, get_auth_context, tenant_filter
 from app.services import rbac_service
 from app.models import (
@@ -44,7 +45,8 @@ async def list_audit_logs(
     tenant_id: Optional[UUID] = Query(None),
     action: Optional[str] = Query(None),
     actor_type: Optional[str] = Query(None),
-    limit: int = Query(100, le=500),
+    # F-11 — `ge=1` empêche `?limit=-1` de faire remonter une SQLException 500
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     ctx: AuthContext = Depends(get_auth_context),
 ):
@@ -55,8 +57,14 @@ async def list_audit_logs(
         .order_by(desc(AuditLog.created_at))
         .limit(limit)
     )
+    # F-11 — Un filtre `?action=ZZZUNKNOWN` doit renvoyer une liste vide
+    # (résultat cohérent), pas une 500. Le cast `AuditAction(action)`
+    # levait un ValueError non capté avant le fix.
     if action:
-        stmt = stmt.where(AuditLog.action == action)
+        action_enum = try_enum(AuditAction, action)
+        if action_enum is None:
+            return []
+        stmt = stmt.where(AuditLog.action == action_enum)
     if actor_type:
         stmt = stmt.where(AuditLog.actor_type == actor_type)
     rows = (await db.execute(stmt)).scalars().all()
@@ -117,22 +125,34 @@ async def export_audit_csv(
     from fastapi.responses import StreamingResponse
 
     target = tenant_filter(ctx, tenant_id)
-    stmt = (
-        select(AuditLog)
-        .where(AuditLog.tenant_id == target)
-        .order_by(desc(AuditLog.created_at))
-        .limit(limit)
-    )
-    if action:
-        stmt = stmt.where(AuditLog.action == AuditAction(action))
-    if actor_type:
-        stmt = stmt.where(AuditLog.actor_type == actor_type)
-    if since:
-        stmt = stmt.where(AuditLog.created_at >= since)
-    if until:
-        stmt = stmt.where(AuditLog.created_at <= until)
 
-    rows = list((await db.execute(stmt)).scalars().all())
+    # F-11 — filtre `action` inconnu → CSV vide (au lieu de 500).
+    action_enum = None
+    if action:
+        action_enum = try_enum(AuditAction, action)
+        if action_enum is None:
+            rows: list = []
+        else:
+            action_enum = action_enum  # binding pour le stmt ci-dessous
+
+    if action and action_enum is None:
+        rows = []
+    else:
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.tenant_id == target)
+            .order_by(desc(AuditLog.created_at))
+            .limit(limit)
+        )
+        if action_enum is not None:
+            stmt = stmt.where(AuditLog.action == action_enum)
+        if actor_type:
+            stmt = stmt.where(AuditLog.actor_type == actor_type)
+        if since:
+            stmt = stmt.where(AuditLog.created_at >= since)
+        if until:
+            stmt = stmt.where(AuditLog.created_at <= until)
+        rows = list((await db.execute(stmt)).scalars().all())
 
     buf = io.StringIO()
     buf.write("﻿")  # BOM UTF-8 pour Excel
@@ -204,11 +224,21 @@ class ConversationOut(BaseModel):
 async def list_conversations(
     tenant_id: Optional[UUID] = Query(None),
     channel: Optional[str] = Query(None),
-    limit: int = Query(50, le=200),
+    # F-11 — `ge=1` empêche `?limit=-1` de faire remonter une SQLException 500
+    limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     ctx: AuthContext = Depends(get_auth_context),
 ):
     target = tenant_filter(ctx, tenant_id)
+
+    # F-11 — channel inconnu (ex. ?channel=ZZZ) → liste vide, pas 500.
+    channel_enum = None
+    if channel:
+        from app.models import Channel
+        channel_enum = try_enum(Channel, channel)
+        if channel_enum is None:
+            return []
+
     stmt = (
         select(Conversation, EndUser)
         .join(EndUser, EndUser.id == Conversation.end_user_id)
@@ -216,8 +246,8 @@ async def list_conversations(
         .order_by(desc(Conversation.last_activity_at))
         .limit(limit)
     )
-    if channel:
-        stmt = stmt.where(Conversation.channel == channel)
+    if channel_enum is not None:
+        stmt = stmt.where(Conversation.channel == channel_enum)
     rows = (await db.execute(stmt)).all()
 
     out: list[ConversationOut] = []
