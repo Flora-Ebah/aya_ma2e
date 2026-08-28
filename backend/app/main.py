@@ -100,6 +100,25 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """F-08 — anonymise les headers qui divulguent la pile technique.
+
+    Écrase `Server: uvicorn` par une valeur générique, retire tout
+    `X-Powered-By` éventuel, et ajoute quelques en-têtes de sécurité
+    de base cohérents avec le reste de l'application.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["server"] = "MA2E"
+        if "x-powered-by" in response.headers:
+            del response.headers["x-powered-by"]
+        response.headers.setdefault("x-content-type-options", "nosniff")
+        response.headers.setdefault("x-frame-options", "DENY")
+        response.headers.setdefault("referrer-policy", "strict-origin-when-cross-origin")
+        return response
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Applique les règles de rate limit définies dans `app.core.rate_limit`.
 
@@ -197,6 +216,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RequestContextMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(CSRFMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
@@ -206,6 +226,30 @@ app.add_middleware(
     expose_headers=["X-CSRF-Token"],
     max_age=600,
 )
+
+# F-11 — les erreurs de validation Pydantic levées à l'intérieur d'une route
+# (ex : parsing d'un payload en dehors du modèle FastAPI) remontaient en 500
+# et exposaient une stack trace. On les convertit désormais en 400 propres,
+# aussi cohérents que ceux émis par la validation FastAPI (RequestValidationError).
+from pydantic import ValidationError as _PydanticValidationError
+
+@app.exception_handler(_PydanticValidationError)
+async def _handle_pydantic_validation_error(request: Request, exc: _PydanticValidationError):
+    return JSONResponse(
+        status_code=400,
+        content={
+            "detail": "Requête invalide : les données ne respectent pas le schéma attendu.",
+            "errors": [
+                {
+                    "loc": list(err.get("loc") or []),
+                    "msg": err.get("msg") or "invalid",
+                    "type": err.get("type") or "value_error",
+                }
+                for err in exc.errors()[:20]
+            ],
+        },
+    )
+
 
 app.include_router(auth_api.router)
 app.include_router(me_api.router)

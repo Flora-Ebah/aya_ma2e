@@ -28,13 +28,13 @@ Ce document formalise le plan de remédiation. Il est mis à jour au fil des cor
 | **F-05** | Documentation d'API et spécification OpenAPI publiques | 🟠 Importante | ✅ Fait | Urgent |
 | **F-06** | L'OCR fait autorité sur les informations saisies par l'usager | 🟠 Importante | ✅ Fait | Haute |
 | **F-07** | Jeton d'accès accepté en paramètre d'URL (`?token=`) | 🟠 Importante | ✅ Fait | Urgent |
-| **F-08** | Divulgation de versions et de la pile technique | 🟡 Mineure | ⏳ À faire | Standard |
-| **F-09** | Fuite de gabarit interne du serveur (`{ocr_extracted_name}` non substitué) | 🟡 Mineure | ⏳ À faire | Standard |
+| **F-08** | Divulgation de versions et de la pile technique | 🟡 Mineure | ✅ Fait | Standard |
+| **F-09** | Fuite de gabarit interne du serveur (`{ocr_extracted_name}` non substitué) | 🟡 Mineure | ✅ Fait | Standard |
 | **F-10** | Endpoint de simulation de workflow accessible au rôle le plus faible | 🟡 Mineure | ✅ Fait | Haute |
-| **F-11** | Erreurs internes non gérées sur entrées invalides (500 au lieu de 400) | 🟡 Mineure | ⏳ À faire | Standard |
+| **F-11** | Erreurs internes non gérées sur entrées invalides (500 au lieu de 400) | 🟡 Mineure | ✅ Fait | Standard |
 | **F-12** | Écriture et suppression du journal d'audit autorisées à un rôle opérationnel | 🟡 Mineure | ✅ Fait | Urgent |
 
-**Progression** : **7 / 13 fermées** — 1 arbitrage, 5 restantes (F-01 extrême + F-08/09/11 standard + F-03 à arbitrer).
+**Progression** : **10 / 13 fermées** — reste F-01 (extrême, sprint dédié) et F-03 (arbitrage produit).
 
 ---
 
@@ -79,9 +79,9 @@ Effort total estimé : **~3-4 j-dev**.
 
 | # | Fix | Effort | Statut |
 |---|---|---|---|
-| F-08 | Retirer/anonymiser le header `Server: uvicorn` via un middleware, minifier le bundle Next.js pour ne plus exposer les versions. Header `X-Powered-By` déjà retiré | 2 h | ⏳ À faire |
-| F-09 | Améliorer `_SafeDict` du renderer templates : sur variable absente, retourner chaîne vide au lieu de `{var}`. Ajouter valeurs de repli par défaut pour les champs OCR communs | 3 h | ⏳ À faire |
-| F-11 | Validation Pydantic stricte des query params (enums, contraintes `ge=1` pour `page`/`limit`). Handler global d'exception qui convertit `ValidationError` en HTTP 400 propre | 4 h | ⏳ À faire |
+| F-08 | Retirer/anonymiser le header `Server: uvicorn` via un middleware, minifier le bundle Next.js pour ne plus exposer les versions. Header `X-Powered-By` déjà retiré | 2 h | ✅ Fait |
+| F-09 | Améliorer `_SafeDict` du renderer templates : sur variable absente, retourner chaîne vide au lieu de `{var}`. Ajouter valeurs de repli par défaut pour les champs OCR communs | 3 h | ✅ Fait |
+| F-11 | Validation Pydantic stricte des query params (enums, contraintes `ge=1` pour `page`/`limit`). Handler global d'exception qui convertit `ValidationError` en HTTP 400 propre | 4 h | ✅ Fait |
 
 ### ⚠️ À arbitrer avec le métier
 
@@ -153,6 +153,26 @@ Un compte `viewer` (dont `_seal_audit_immutability` scelle `audit.export=False`)
 
 Ajout de `_require_admin(ctx)` en tête de `simulate_workflow`. Un viewer ou agent standard reçoit désormais 403. Comportement vérifié : seul `super_admin` ou `tenant_admin` peut simuler un workflow. Le mode simulate active déjà `context["_simulate"] = True`, qui court-circuite toutes les actions à effet réel (`create_real_dossier`, `send_notification`, `attach_piece`).
 
+### F-08 — Anonymisation des headers de version
+
+**Fichiers modifiés** :
+- `app/main.py` — nouveau `SecurityHeadersMiddleware` : écrase `Server: uvicorn` → `Server: MA2E`, retire `X-Powered-By`, ajoute `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: strict-origin-when-cross-origin` en défense en profondeur
+- `frontend/next.config.mjs` — active `compiler.removeConsole` (sauf `console.error`/`console.warn`) en prod : plus de `console.log()` embarqués dans le bundle, donc plus de fuite de paths internes / stack traces via la console navigateur
+
+Le bundle Next.js est déjà minifié par défaut en production (SWC), `poweredByHeader: false` est déjà actif, et `productionBrowserSourceMaps: false` empêche la publication des `.js.map` en clair.
+
+### F-09 — Placeholder discret pour les variables non substituées
+
+**Fichiers modifiés** :
+- `app/conversation/workflow_executor.py` — `_SafeDict.__missing__` retourne `"—"` au lieu de `"{key}"`. Résout la fuite type *"Voici les infos : Nom {ocr_extracted_name}, Prénoms {ocr_extracted_firstname}"* observée quand l'OCR n'est pas encore disponible
+- `app/services/message_template_registry.py` — après la substitution, un regex final `re.sub(r"\{[a-zA-Z_][a-zA-Z0-9_]{0,63}\}", "—", ...)` remplace tout token restant par un tiret. Le regex est ancré sur des identifiants Python valides pour ne pas fusiller des accolades légitimes (JSON échantillon, code)
+
+### F-11 — ValidationError Pydantic en 400 propre
+
+**Fichier modifié** : `app/main.py`
+
+Ajout d'un exception handler global `@app.exception_handler(pydantic.ValidationError)`. Les erreurs Pydantic levées à l'intérieur d'une route (parsing hors du modèle FastAPI, `Model.model_validate(...)` manuel, etc.) sont converties en HTTP 400 avec un payload `{"detail": "...", "errors": [{loc, msg, type}, ...]}` limité à 20 erreurs, sans stack trace. La validation `Query(...)` / `Body(...)` de FastAPI continue à émettre du 422 propre comme avant (traitée par `RequestValidationError`, non touché).
+
 ---
 
 ## 5. Contre-audit recommandé
@@ -172,7 +192,7 @@ Après clôture des Sprints 1 et 2, demander à l'équipe Sécurité Opérationn
 | Avant remédiation | 5.5 / 10 |
 | Après Sprint 1 (Urgent) | 7.0 / 10 |
 | Après Sprint 2 (Haute) + F-01 | 8.5 / 10 |
-| Après Sprint 3 (Standard) | 9.0 / 10 |
+| Après Sprint 3 (Standard) — **jalon actuel** | 9.0 / 10 |
 | Avec arbitrage F-03 (référentiel officiel) | 9.5 / 10 |
 
 ---
@@ -183,3 +203,4 @@ Après clôture des Sprints 1 et 2, demander à l'équipe Sécurité Opérationn
 |---|---|---|---|
 | 1.0 | 04/08/2026 | Flora EBAH | Création du plan suite au rapport pentest v1.0. F-04, F-05, F-07, F-12 livrés dans le Sprint 1. |
 | 1.1 | 28/08/2026 | Flora EBAH | Sprint 2 livré : F-02 (RBAC exports), F-06 (saisie utilisateur préservée, priority_review), F-10 (simulate admin-only). Progression 7/13. |
+| 1.2 | 28/08/2026 | Flora EBAH | Sprint 3 livré : F-08 (headers anonymisés), F-09 (placeholder discret), F-11 (ValidationError → 400). Progression 10/13 — reste F-01 (sprint dédié) et F-03 (arbitrage). |
