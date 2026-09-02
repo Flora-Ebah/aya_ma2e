@@ -26,6 +26,7 @@ from app.models import PieceFace, PieceType
 from app.services.ocr_guardrails import (
     SYSTEM_PROMPT_ID_EXTRACTION,
     build_user_message,
+    detect_counterfeit_markers,
     sanitize_extracted_fields,
 )
 
@@ -234,6 +235,12 @@ async def _structure_with_llm(raw_text: str, face: PieceFace) -> dict:
         logger.warning("OCR sanitize warnings (%s) : %s", face.value, warnings)
     structured["fields"] = clean_fields
     structured["_guardrails_warnings"] = warnings
+
+    # F-03 (mitigation) — détection de marqueurs de contrefaçon triviaux.
+    counterfeit = detect_counterfeit_markers(raw_text, clean_fields)
+    if counterfeit:
+        logger.warning("OCR counterfeit markers (%s) : %s", face.value, counterfeit)
+    structured["_counterfeit_markers"] = counterfeit
     return structured
 
 

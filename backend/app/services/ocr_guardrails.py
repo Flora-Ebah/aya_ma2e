@@ -114,6 +114,100 @@ def _looks_injection(value: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# F-03 (mitigation) — détection heuristique de documents évidemment factices
+# ---------------------------------------------------------------------------
+# Sans intégration officielle (ANI Côte d'Ivoire, Smile ID, Youverify, etc.),
+# la plateforme ne peut pas confronter une pièce à un registre. En attendant
+# l'arbitrage du comité de pilotage (voir docs/DECISION_F03_referentiel.md),
+# on bloque au moins les documents portant des marqueurs évidents de fabrication
+# ou de spécimen. Ça ferme le PoC pentester (une pièce "SPECIMEN / SPECIMEN /
+# IC000000411 / 2000-01-01") tout en gardant la porte ouverte à l'intégration
+# officielle à venir.
+_SPECIMEN_MARKERS: tuple[re.Pattern, ...] = (
+    # Mots-clés (français et anglais). Recherche le mot entier, insensible casse.
+    re.compile(r"\bSPECIMEN\b", re.IGNORECASE),
+    re.compile(r"\bSP[EÉ]CIMEN\b", re.IGNORECASE),
+    re.compile(r"\bECHANTILLON\b", re.IGNORECASE),
+    re.compile(r"\b[ÉE]CHANTILLON\b", re.IGNORECASE),
+    re.compile(r"\bSAMPLE\b", re.IGNORECASE),
+    re.compile(r"\bEXEMPLE\b", re.IGNORECASE),
+    re.compile(r"\bEXAMPLE\b", re.IGNORECASE),
+    re.compile(r"\bDEMO(NSTRATION)?\b", re.IGNORECASE),
+    re.compile(r"\bTEST\b", re.IGNORECASE),
+    re.compile(r"\bVOID\b", re.IGNORECASE),
+    re.compile(r"\bFAKE\b", re.IGNORECASE),
+    re.compile(r"\bFACTICE\b", re.IGNORECASE),
+    re.compile(r"\bFICTIF\b", re.IGNORECASE),
+    re.compile(r"\bDUMMY\b", re.IGNORECASE),
+    re.compile(r"\bPROTOTYPE\b", re.IGNORECASE),
+    re.compile(r"\bPLACEHOLDER\b", re.IGNORECASE),
+    re.compile(r"NOT\s*VALID", re.IGNORECASE),
+    re.compile(r"NON\s*VALIDE", re.IGNORECASE),
+)
+
+
+def _is_suspicious_document_number(value: str) -> bool:
+    """Détecte des numéros de pièce évidemment factices.
+
+    - séquences de chiffres identiques (000000, 11111111)
+    - séquences numériques triviales (12345678, 87654321)
+    - IC000000..., FAKE..., TEST..., DEMO...
+    """
+    if not value:
+        return False
+    v = value.strip().upper()
+    # Marqueur textuel dans le n° pièce
+    for pat in (r"FAKE", r"TEST", r"DEMO", r"SPECIMEN", r"^IC?0{6,}", r"^0{6,}"):
+        if re.search(pat, v):
+            return True
+    # Extraction des chiffres seuls
+    digits = re.sub(r"\D", "", v)
+    if len(digits) >= 6:
+        # Tous les chiffres identiques
+        if len(set(digits)) == 1:
+            return True
+        # Séquence croissante ou décroissante triviale
+        if digits in "01234567890123456789":
+            return True
+        if digits in "98765432109876543210":
+            return True
+    return False
+
+
+def detect_counterfeit_markers(raw_text: str, fields: Optional[dict] = None) -> list[str]:
+    """F-03 (mitigation) — retourne la liste des marqueurs de contrefaçon détectés.
+
+    `raw_text`     : texte OCR brut extrait par Azure Vision / Mindee / OCR.space
+    `fields`       : dict des champs déjà structurés par le LLM (optionnel)
+
+    Retourne un tableau vide si le document semble légitime, sinon une liste
+    de marqueurs textuels à joindre au dossier (utile pour l'arbitrage
+    humain en back-office et pour l'audit).
+    """
+    warnings: list[str] = []
+
+    # 1) Marqueurs textuels dans le corps OCR
+    for pat in _SPECIMEN_MARKERS:
+        m = pat.search(raw_text or "")
+        if m:
+            warnings.append(f"specimen_marker:{m.group(0).upper()[:32]}")
+
+    # 2) Numéro de pièce suspect
+    if isinstance(fields, dict):
+        num = fields.get("numero_piece") or fields.get("document_number") or ""
+        if isinstance(num, str) and _is_suspicious_document_number(num):
+            warnings.append(f"suspicious_document_number:{num[:32]}")
+
+        # 3) Nom/prénoms qui contiennent eux-mêmes SPECIMEN — cas PoC pentester
+        for key in ("nom", "prenoms"):
+            v = fields.get(key)
+            if isinstance(v, str) and any(p.search(v) for p in _SPECIMEN_MARKERS):
+                warnings.append(f"specimen_in_identity_field:{key}")
+
+    return warnings
+
+
 def sanitize_extracted_fields(fields: dict) -> tuple[dict, list[str]]:
     """Nettoie `fields` retourné par le LLM. Renvoie (fields_ok, warnings).
 

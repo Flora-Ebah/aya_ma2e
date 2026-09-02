@@ -833,6 +833,32 @@ async def create_real_dossier(
                 dossier.dossier_number, mismatches, closes,
             )
 
+        # F-03 (mitigation) — un dossier avec des marqueurs de contrefaçon
+        # remontés par ocr_guardrails.detect_counterfeit_markers (SPECIMEN,
+        # numéro trivial, etc.) est bloqué en revue humaine, quel que soit
+        # l'état des autres contrôles. En attendant l'intégration d'un
+        # référentiel officiel (voir docs/DECISION_F03_referentiel.md),
+        # cette heuristique évite au moins qu'une pièce marquée « SPECIMEN »
+        # ne passe silencieusement.
+        counterfeit_markers: list = []
+        for face_key in ("ocr_recto", "ocr_verso"):
+            face_data = context.get(face_key) or {}
+            markers = face_data.get("_counterfeit_markers") or []
+            counterfeit_markers.extend(markers)
+        if counterfeit_markers:
+            dossier.priority_review = True
+            reason_f03 = (
+                "Marqueurs de contrefaçon détectés sur la pièce : "
+                + ", ".join(counterfeit_markers[:3])
+            )
+            # Si un motif F-06 était déjà positionné, on préfère garder le
+            # motif F-03 qui est plus grave (potentielle fraude).
+            dossier.priority_reason = reason_f03[:255]
+            logger.warning(
+                "Dossier %s marqué priority_review (F-03) : %s",
+                dossier.dossier_number, counterfeit_markers,
+            )
+
         # Soumission (status → soumis, submitted_at = now)
         await dossier_service.submit_dossier(db, dossier)
 
