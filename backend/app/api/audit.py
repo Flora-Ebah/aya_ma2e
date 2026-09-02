@@ -154,12 +154,18 @@ async def export_audit_csv(
             stmt = stmt.where(AuditLog.created_at <= until)
         rows = list((await db.execute(stmt)).scalars().all())
 
+    # F-02 (Vague 3) — minimisation PII : l'IP est tronquée à /24 (IPv4) ou
+    # /64 (IPv6) et le user-agent est réduit à une empreinte statistique.
+    # On préserve la capacité forensique agrégée sans exposer les identifiants
+    # individuels des utilisateurs des comptes MA2E.
+    from app.services.export_pii import anonymize_ip, sanitize_user_agent
+
     buf = io.StringIO()
     buf.write("﻿")  # BOM UTF-8 pour Excel
     writer = csv.writer(buf, delimiter=";")
     writer.writerow([
-        "id", "created_at_utc", "actor_type", "actor_id", "ip_address",
-        "user_agent", "action", "resource_type", "resource_id",
+        "id", "created_at_utc", "actor_type", "actor_id", "ip_prefix",
+        "user_agent_family", "action", "resource_type", "resource_id",
         "details", "entry_hash", "previous_hash",
     ])
     import json
@@ -169,8 +175,8 @@ async def export_audit_csv(
             r.created_at.isoformat() if r.created_at else "",
             r.actor_type or "",
             r.actor_id or "",
-            r.ip_address or "",
-            (r.user_agent or "")[:256],
+            anonymize_ip(r.ip_address or ""),
+            sanitize_user_agent(r.user_agent or ""),
             r.action.value if r.action else "",
             r.resource_type or "",
             r.resource_id or "",
