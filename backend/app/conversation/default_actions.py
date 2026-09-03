@@ -859,6 +859,27 @@ async def create_real_dossier(
                 dossier.dossier_number, counterfeit_markers,
             )
 
+        # F-01 (Vague 2) — un dossier dont l'OCR a détecté une injection de
+        # prompt dans le texte de la pièce est bloqué en revue humaine et
+        # priority_reason porte explicitement ce motif. Ce motif prime sur
+        # F-03 (tentative d'attaque active > document simplement fabriqué).
+        injection_markers: list = []
+        for face_key in ("ocr_recto", "ocr_verso"):
+            face_data = context.get(face_key) or {}
+            if face_data.get("_prompt_injection_detected"):
+                injection_markers.extend(face_data.get("_prompt_injection_markers") or [])
+        if injection_markers:
+            dossier.priority_review = True
+            reason_f01 = (
+                "Injection de prompt détectée dans le texte OCR de la pièce : "
+                + ", ".join(injection_markers[:3])
+            )
+            dossier.priority_reason = reason_f01[:255]
+            logger.error(
+                "Dossier %s marqué priority_review (F-01) — TENTATIVE D'ATTAQUE : %s",
+                dossier.dossier_number, injection_markers,
+            )
+
         # Soumission (status → soumis, submitted_at = now)
         await dossier_service.submit_dossier(db, dossier)
 

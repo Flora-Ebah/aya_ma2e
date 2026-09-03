@@ -17,6 +17,7 @@ from app.services.ocr_guardrails import (
     SYSTEM_PROMPT_ID_EXTRACTION,
     build_user_message,
     detect_counterfeit_markers,
+    detect_prompt_injection_in_ocr_text,
     sanitize_extracted_fields,
 )
 
@@ -82,6 +83,21 @@ async def _structure_with_llm(raw_text: str, face: PieceFace) -> dict:
     """Utilise Groq pour structurer le texte OCR en champs."""
     if not raw_text or len(raw_text.strip()) < 5:
         return {"fields": {}, "mrz": {}}
+
+    # F-01 (Vague 2) — refuse le document si le texte OCR contient une
+    # instruction masquée. Bloque le PoC pentester sans consulter le LLM.
+    injection_hits = detect_prompt_injection_in_ocr_text(raw_text)
+    if injection_hits:
+        logger.warning(
+            "F-01 : injection de prompt détectée dans le texte OCR (%s) : %s",
+            face.value, injection_hits,
+        )
+        return {
+            "fields": {},
+            "mrz": {},
+            "_prompt_injection_detected": True,
+            "_prompt_injection_markers": injection_hits,
+        }
 
     if face == PieceFace.recto:
         schema_hint = (
