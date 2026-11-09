@@ -349,4 +349,5 @@ async def apply_societaire_update(
         resource_id=str(s.id), actor_type="end_user", details=details,
     )
     await db.flush()
-    return ActionResult(branch_key=None, message=f"✅ *{f['label']}* mis à jour.")
+    # Formulation neutre : la plupart des libellés sont féminins (Catégorie, Fonction…)
+    return ActionResult(branch_key=None, message=f"✅ *{f['label']}* : nouvelle valeur enregistrée.")

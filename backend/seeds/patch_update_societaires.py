@@ -61,6 +61,11 @@ CHANGED = {
     "update_ask_new_value": (
         "Saisissez la *nouvelle valeur* pour ce champ.",
         "Saisissez la *nouvelle valeur* pour *{field_label}* {field_hint}"),
+    # Les modifications sont écrites directement dans la base (aucune revalidation
+    # par un agent) : l'ancien message promettait une revalidation qui n'existe pas.
+    "update_end": (
+        "Merci ! Vos modifications ont été transmises. Un agent revalidera votre dossier si nécessaire.",
+        "✅ Merci ! Vos modifications sont enregistrées dans votre dossier MA2E.\n\nTapez *MENU* pour revenir à l'accueil."),
 }
 
 

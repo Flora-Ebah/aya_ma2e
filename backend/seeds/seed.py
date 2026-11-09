@@ -650,7 +650,7 @@ async def _seed_modification_workflow(db, tenant_id):
          "✅ Modification enregistrée.\n\nUne autre modification ?\n1️⃣ *Oui*  2️⃣ *Non, terminer*"),
         ("update_end", "Fin de mise à jour", WorkflowStepType.message,
          None, None, {},
-         "Merci ! Vos modifications ont été transmises. Un agent revalidera votre dossier si nécessaire."),
+         "✅ Merci ! Vos modifications sont enregistrées dans votre dossier MA2E.\n\nTapez *MENU* pour revenir à l'accueil."),
     ]
     await _seed_workflow(
         db, tenant_id,
