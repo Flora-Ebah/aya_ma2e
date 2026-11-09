@@ -346,14 +346,20 @@ async def dispatch(
             db, result.switch_to_step,
         )
         if target_workflow is not None:
+            # Le pin doit suivre la bascule : sinon le tour suivant recharge
+            # l'ANCIEN workflow (ex. Consultation) avec une étape du nouveau
+            # (update_ask_matricule), introuvable → le parcours repart de zéro.
+            switched_ctx = dict(result.context)
+            switched_ctx["_pinned_workflow_id"] = str(target_workflow.id)
             result = await workflow_executor.execute(
                 db,
                 workflow=target_workflow,
                 tenant_id=tenant.id,
                 current_step_code=None,   # démarre au start du nouveau workflow
                 user_input=None,
-                context=result.context,
+                context=switched_ctx,
             )
+            result.context["_pinned_workflow_id"] = str(target_workflow.id)
             workflow = target_workflow
 
     # Persiste le nouvel état
