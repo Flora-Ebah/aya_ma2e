@@ -459,14 +459,16 @@ export const api = {
     const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     return `${base}/api/imports/template/${target}`;
   },
-  uploadImport: async (target: string, file: File) => {
+  // `dryRun` (cible « societaires ») : le backend valide et compte sans rien écrire.
+  uploadImport: async (target: string, file: File, opts?: { dryRun?: boolean }) => {
     const form = new FormData();
     form.append("file", file);
     const headers: Record<string, string> = {};
     const csrf = readCsrfCookie();
     if (csrf) headers["X-CSRF-Token"] = csrf;
     const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const res = await fetch(`${base}/api/imports/${target}`, {
+    const qs = opts?.dryRun ? "?dry_run=true" : "";
+    const res = await fetch(`${base}/api/imports/${target}${qs}`, {
       method: "POST",
       body: form,
       credentials: "include",

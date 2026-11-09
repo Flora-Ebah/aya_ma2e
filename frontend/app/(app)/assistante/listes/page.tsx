@@ -962,6 +962,37 @@ function AddSocietaireModal({
   );
 }
 
+type ImportKind = "base" | "referentiel";
+
+type ImportReportData = {
+  total_lines: number;
+  accepted: number;
+  updated?: number;
+  rejected: number;
+  dry_run?: boolean;
+  errors: Array<{ line: number; error: string; data: any }>;
+  warnings?: Array<{ line: number; id_client?: string; warning: string }>;
+};
+
+// Deux fichiers différents passent par cette fenêtre :
+// - « base »        → base des sociétaires MA2E (fichier source Perfect Vision : id_client,
+//                     num_manuel, nom_client…) → POST /api/imports/societaires. Analyse
+//                     (dry_run) puis confirmation ; ré-import = mise à jour, sans doublon.
+// - « referentiel » → référentiel des matricules ERANOVE (matricule, employeur_code, nom…)
+//                     → POST /api/imports/collaborateurs, transaction atomique.
+const IMPORT_KINDS: Record<ImportKind, { target: string; title: string; desc: string }> = {
+  base: {
+    target: "societaires",
+    title: "Base des sociétaires MA2E",
+    desc: "Fichier source MA2E (id_client, num_manuel, nom_client…). Analyse puis confirmation ; un ré-import met à jour sans doublon.",
+  },
+  referentiel: {
+    target: "collaborateurs",
+    title: "Référentiel des matricules ERANOVE",
+    desc: "Liste des agents éligibles (matricule, employeur_code, nom, prenoms). Aucune ligne n'est insérée si une seule contient une erreur.",
+  },
+};
+
 function ImportSocietairesModal({
   onClose,
   onDone,
@@ -971,26 +1002,30 @@ function ImportSocietairesModal({
   onDone: () => void;
   notify: (msg: string, type: "success" | "error") => void;
 }) {
+  const [kind, setKind] = useState<ImportKind>("base");
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [report, setReport] = useState<{
-    total_lines: number;
-    accepted: number;
-    rejected: number;
-    errors: Array<{ line: number; error: string; data: any }>;
-  } | null>(null);
+  const [report, setReport] = useState<ImportReportData | null>(null);
+  const isBase = kind === "base";
+  const target = IMPORT_KINDS[kind].target;
 
-  async function run() {
+  async function run(dryRun: boolean) {
     if (!file) return;
     setUploading(true);
-    setReport(null);
     try {
-      const r = await api.uploadImport("collaborateurs", file);
+      const r: ImportReportData = await api.uploadImport(target, file, { dryRun });
       setReport(r);
-      if (r.rejected > 0) {
+      if (isBase) {
+        if (dryRun) return; // l'aperçu s'affiche, l'utilisateur confirme ensuite
+        notify(
+          `Base MA2E : ${r.accepted} créé(s), ${r.updated ?? 0} mis à jour` +
+            (r.rejected ? `, ${r.rejected} ligne(s) rejetée(s).` : "."),
+          r.rejected ? "error" : "success",
+        );
+      } else if (r.rejected > 0) {
         notify(`Import refusé : ${r.rejected} erreur(s) — aucune ligne insérée.`, "error");
       } else {
-        notify(`${r.accepted} sociétaire(s) importé(s).`, "success");
+        notify(`${r.accepted} matricule(s) importé(s).`, "success");
       }
     } catch (e: any) {
       notify(e?.message ?? "Erreur.", "error");
@@ -999,7 +1034,20 @@ function ImportSocietairesModal({
     }
   }
 
-  const success = report && report.rejected === 0;
+  function reset() {
+    setReport(null);
+    setFile(null);
+  }
+
+  const isPreview = !!report?.dry_run;
+  const written = isBase ? report && !report.dry_run : report && report.rejected === 0;
+  // Fichier source MA2E déposé dans le référentiel ERANOVE : toutes les lignes manquent de `matricule`.
+  const looksLikeMa2eSource =
+    !isBase &&
+    !!report &&
+    report.accepted === 0 &&
+    report.errors.length > 0 &&
+    report.errors.every((e) => e.error.includes("'matricule'"));
 
   return (
     <div
@@ -1018,27 +1066,43 @@ function ImportSocietairesModal({
         if (e.target === e.currentTarget && !uploading) onClose();
       }}
     >
-      <div
-        className="sa-card"
-        style={{ maxWidth: 720, width: "100%", margin: "32px auto" }}
-      >
+      <div className="sa-card" style={{ maxWidth: 760, width: "100%", margin: "32px auto" }}>
         <div className="sa-card__header">
-          <h2 className="sa-card__title">Importer les sociétaires</h2>
-          <p className="sa-card__desc">
-            CSV (UTF-8) ou Excel (.xlsx) — max 10 Mo. Transaction atomique : aucune ligne
-            n&apos;est insérée si une seule contient une erreur.
-          </p>
+          <h2 className="sa-card__title">Importer un fichier</h2>
+          <p className="sa-card__desc">CSV (UTF-8 ou Windows) ou Excel (.xlsx).</p>
         </div>
+
         {!report && (
           <div style={{ display: "grid", gap: 12 }}>
+            <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
+              <legend className="sa-label" style={{ marginBottom: 6 }}>
+                Type de fichier
+              </legend>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {(Object.keys(IMPORT_KINDS) as ImportKind[]).map((k) => (
+                  <label key={k} className="sa-choice">
+                    <input
+                      type="radio"
+                      name="import-kind"
+                      checked={kind === k}
+                      onChange={() => setKind(k)}
+                    />
+                    <span className="sa-choice__body">
+                      <span className="sa-choice__title">{IMPORT_KINDS[k].title}</span>
+                      <span className="sa-choice__desc">{IMPORT_KINDS[k].desc}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
             <div>
               <a
-                href={api.downloadImportTemplate("collaborateurs")}
+                href={api.downloadImportTemplate(target)}
                 className="sa-btn sa-btn--ghost sa-btn--sm"
                 download
               >
                 <Icon name="download-02" className="i" />
-                Télécharger le modèle CSV
+                {isBase ? "Télécharger les en-têtes attendus" : "Télécharger le modèle CSV"}
               </a>
             </div>
             <label
@@ -1053,7 +1117,7 @@ function ImportSocietairesModal({
             >
               <input
                 type="file"
-                accept=".csv,.xlsx,.xls,text/csv"
+                accept=".csv,.xlsx,text/csv"
                 style={{ display: "none" }}
                 onChange={(e) => setFile(e.target.files?.[0] ?? null)}
               />
@@ -1074,19 +1138,46 @@ function ImportSocietairesModal({
               <button
                 type="button"
                 className="sa-btn sa-btn--primary"
-                onClick={run}
+                onClick={() => run(isBase)}
                 disabled={!file || uploading}
               >
-                {uploading ? "Import en cours…" : "Lancer l'import"}
+                {uploading
+                  ? isBase
+                    ? "Analyse en cours…"
+                    : "Import en cours…"
+                  : isBase
+                    ? "Analyser le fichier"
+                    : "Lancer l'import"}
               </button>
             </div>
           </div>
         )}
+
         {report && (
           <div style={{ display: "grid", gap: 12 }}>
-            <div style={{ display: "flex", gap: 12 }}>
+            {isPreview && (
+              <div className="sa-alert sa-alert--info" role="status" style={{ padding: 12 }}>
+                <Icon name="information-circle" className="i" />
+                <span>
+                  Aperçu : rien n&apos;a encore été enregistré. Vérifiez les chiffres, puis
+                  confirmez l&apos;import.
+                </span>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
               <Metric label="Total" value={report.total_lines} />
-              <Metric label="Acceptées" value={report.accepted} color="rgb(var(--color-brand-primary))" />
+              <Metric
+                label={isBase ? (isPreview ? "À créer" : "Créés") : "Acceptées"}
+                value={report.accepted}
+                color="rgb(var(--color-brand-primary))"
+              />
+              {isBase && (
+                <Metric
+                  label={isPreview ? "À mettre à jour" : "Mis à jour"}
+                  value={report.updated ?? 0}
+                  color="rgb(var(--color-brand-primary))"
+                />
+              )}
               <Metric
                 label="Rejetées"
                 value={report.rejected}
@@ -1096,11 +1187,36 @@ function ImportSocietairesModal({
                     : "rgb(var(--color-brand-primary))"
                 }
               />
+              {isBase && (report.warnings?.length ?? 0) > 0 && (
+                <Metric label="À vérifier" value={report.warnings!.length} />
+              )}
             </div>
-            {report.errors.length > 0 ? (
+
+            {looksLikeMa2eSource && (
+              <div className="sa-alert sa-alert--warning" role="alert" style={{ padding: 12 }}>
+                <Icon name="alert-02" className="i" />
+                <span>
+                  Ce fichier ressemble au fichier source MA2E (pas de colonne « matricule »).
+                  Choisissez plutôt « {IMPORT_KINDS.base.title} ».
+                </span>
+                <button
+                  type="button"
+                  className="sa-btn sa-btn--secondary sa-btn--sm"
+                  style={{ marginLeft: "auto" }}
+                  onClick={() => {
+                    setKind("base");
+                    setReport(null);
+                  }}
+                >
+                  Importer comme base MA2E
+                </button>
+              </div>
+            )}
+
+            {(report.errors.length > 0 || (report.warnings?.length ?? 0) > 0) && (
               <div
                 style={{
-                  maxHeight: 240,
+                  maxHeight: 260,
                   overflowY: "auto",
                   border: "1px solid rgb(var(--color-border-default, 230 230 230))",
                   borderRadius: 6,
@@ -1110,47 +1226,68 @@ function ImportSocietairesModal({
                   <thead>
                     <tr>
                       <th style={{ width: 60 }}>Ligne</th>
-                      <th>Erreur</th>
+                      <th style={{ width: 110 }}>Type</th>
+                      <th>Détail</th>
                     </tr>
                   </thead>
                   <tbody>
                     {report.errors.map((e, i) => (
-                      <tr key={i}>
+                      <tr key={`e${i}`}>
                         <td style={{ fontFamily: "monospace" }}>{e.line}</td>
+                        <td style={{ color: "rgb(var(--color-feedback-error))" }}>Rejetée</td>
                         <td>{e.error}</td>
+                      </tr>
+                    ))}
+                    {(report.warnings ?? []).map((w, i) => (
+                      <tr key={`w${i}`}>
+                        <td style={{ fontFamily: "monospace" }}>{w.line}</td>
+                        <td>À vérifier</td>
+                        <td>
+                          {w.id_client ? `${w.id_client} — ` : ""}
+                          {w.warning}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-            ) : (
-              <div
-                className="sa-alert sa-alert--success"
-                role="status"
-                style={{ padding: 12 }}
-              >
+            )}
+
+            {written && report.errors.length === 0 && (
+              <div className="sa-alert sa-alert--success" role="status" style={{ padding: 12 }}>
                 <Icon name="checkmark-circle-02" className="i" />
-                <span>{report.accepted} sociétaire(s) importé(s) avec succès.</span>
+                <span>
+                  {isBase
+                    ? `${report.accepted} sociétaire(s) créé(s) et ${report.updated ?? 0} mis à jour dans la base MA2E (utilisée par « Consulter mon dossier » et « Modifier mes informations »).`
+                    : `${report.accepted} matricule(s) importé(s) avec succès.`}
+                </span>
               </div>
             )}
+
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button
-                type="button"
-                className="sa-btn sa-btn--ghost"
-                onClick={() => {
-                  setReport(null);
-                  setFile(null);
-                }}
-              >
-                Nouvel import
+              <button type="button" className="sa-btn sa-btn--ghost" onClick={reset}>
+                {isPreview ? "Changer de fichier" : "Nouvel import"}
               </button>
-              <button
-                type="button"
-                className="sa-btn sa-btn--primary"
-                onClick={() => (success ? onDone() : onClose())}
-              >
-                {success ? "Terminer" : "Fermer"}
-              </button>
+              {isPreview ? (
+                <button
+                  type="button"
+                  className="sa-btn sa-btn--primary"
+                  onClick={() => run(false)}
+                  disabled={uploading || report.accepted + (report.updated ?? 0) === 0}
+                >
+                  {uploading
+                    ? "Import en cours…"
+                    : `Confirmer l'import (${report.accepted + (report.updated ?? 0)} ligne(s))`}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="sa-btn sa-btn--primary"
+                  onClick={() => (written ? onDone() : onClose())}
+                >
+                  {written ? "Terminer" : "Fermer"}
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -1172,8 +1309,11 @@ function Metric({
     <div
       style={{
         flex: 1,
+        minWidth: 110,
         padding: 12,
-        background: "rgb(var(--color-bg-elevated, 245 245 245))",
+        // `--color-bg-elevated` n'existe pas dans tokens.css : le repli gris clair
+        // s'appliquait aussi en thème sombre (chiffres blancs illisibles).
+        background: "rgb(var(--color-bg-surface-subtle, 245 245 245))",
         borderRadius: 6,
       }}
     >
