@@ -1,37 +1,60 @@
+"""LLM conversationnel — bascule vers Azure OpenAI (gpt-5.4-mini).
+
+Garde l'interface (chat_complete, classify_intent, smart_reply,
+tenant_chat_complete) **identique** à l'ancienne version Groq pour que les
+modules appelants (workflow_executor, default_actions, rag…) n'aient
+rien à modifier.
+
+Le routage technique se fait dans `llm_azure.py` qui parle directement à
+la Responses API Azure.
+"""
 import json
 from typing import Optional
+from uuid import UUID
 
-from groq import AsyncGroq
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
-
-_client: Optional[AsyncGroq] = None
-
-
-def _get_client() -> AsyncGroq:
-    global _client
-    if _client is None:
-        _client = AsyncGroq(api_key=settings.groq_api_key)
-    return _client
+from app.conversation import llm_azure
 
 
-async def chat_complete(system_prompt: str, user_message: str, history: Optional[list[dict]] = None, model: Optional[str] = None) -> str:
-    messages = [{"role": "system", "content": system_prompt}]
+async def chat_complete(
+    system_prompt: str,
+    user_message: str,
+    history: Optional[list[dict]] = None,
+    model: Optional[str] = None,  # ignoré : Azure utilise le deployment configuré
+    temperature: float = 0.3,
+    max_tokens: int = 512,
+) -> str:
+    """Appel LLM avec historique optionnel.
+
+    La Responses API Azure accepte un tableau `input` de role/content.
+    On reconstruit ce tableau à partir du system prompt + historique + dernier
+    message utilisateur.
+    """
+    # NB: notre wrapper Azure ne gère pas (encore) l'historique multi-tours en
+    # natif. On le sérialise dans le user_message au format conversationnel
+    # quand il est fourni, ce qui couvre les besoins actuels (RAG + chat libre).
     if history:
-        messages.extend(history)
-    messages.append({"role": "user", "content": user_message})
+        rendered_history = "\n".join(
+            f"{m['role'].upper()} : {m['content']}" for m in history if m.get('content')
+        )
+        user_message = (
+            f"Historique récent de la conversation :\n{rendered_history}\n\n"
+            f"Message courant de l'utilisateur :\n{user_message}"
+        )
 
-    client = _get_client()
-    resp = await client.chat.completions.create(
-        model=model or settings.groq_model,
-        messages=messages,
-        temperature=0.3,
-        max_tokens=512,
+    return await llm_azure.chat_complete(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        max_tokens=max_tokens,
+        temperature=temperature,
     )
-    return resp.choices[0].message.content or ""
 
 
-async def classify_intent(user_message: str, menu_options: list[dict], tenant_name: str) -> dict:
+async def classify_intent(
+    user_message: str, menu_options: list[dict], tenant_name: str,
+) -> dict:
+    """Classifie un message dans l'une des options du menu (ou 'other')."""
     options_str = "\n".join([f"- {opt['key']}: {opt['label']}" for opt in menu_options])
     system = (
         f"Tu es un classificateur d'intentions pour l'assistant virtuel de {tenant_name}. "
@@ -51,5 +74,42 @@ async def classify_intent(user_message: str, menu_options: list[dict], tenant_na
     return {"intent": "other", "confidence": 0.0, "rationale": "fallback"}
 
 
-async def smart_reply(system_prompt: str, user_message: str, history: list[dict]) -> str:
-    return await chat_complete(system_prompt=system_prompt, user_message=user_message, history=history)
+async def smart_reply(
+    system_prompt: str, user_message: str, history: list[dict],
+) -> str:
+    return await chat_complete(
+        system_prompt=system_prompt, user_message=user_message, history=history,
+    )
+
+
+async def tenant_chat_complete(
+    db: AsyncSession,
+    tenant_id: Optional[UUID],
+    *,
+    task_prompt: str,
+    user_message: str,
+    history: Optional[list[dict]] = None,
+) -> str:
+    """High-level helper qui charge les settings IA du tenant.
+
+    Le `task_prompt` est concaténé à la persona globale (ai_persona_intro) pour
+    bâtir le system prompt final. Permet à chaque tenant d'avoir un ton/des
+    règles propres tout en gardant des consignes par tâche.
+    """
+    from app.services.ai_settings_service import get_for_tenant
+
+    ai = await get_for_tenant(db, tenant_id)
+    system_prompt = ai.build_system_prompt(task_prompt)
+
+    if history and ai.max_history_messages > 0:
+        history = history[-ai.max_history_messages:]
+    elif history and ai.max_history_messages == 0:
+        history = None
+
+    return await chat_complete(
+        system_prompt=system_prompt,
+        user_message=user_message,
+        history=history,
+        temperature=ai.temperature,
+        max_tokens=ai.max_tokens,
+    )

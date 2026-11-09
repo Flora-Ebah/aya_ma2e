@@ -18,10 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.conversation import dispatcher
 from app.conversation import utils as conv_utils
+from app.conversation import workflow_executor
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.storage import put_object
 from app.models import Channel, MessageDirection, Tenant
+from app.models.workflow import Workflow
 
 router = APIRouter(prefix="/webhooks/web", tags=["webhooks"])
 logger = logging.getLogger(__name__)
@@ -93,6 +95,7 @@ class WebChatResponse(BaseModel):
     reply: str
     session_id: str
     state: str
+    ui: dict | None = None
 
 
 @router.post("/{tenant_slug}", response_model=WebChatResponse)
@@ -152,7 +155,71 @@ async def web_chat(
         reply=reply.text,
         session_id=payload.session_id,
         state=conversation.state,
+        ui=reply.ui,
     )
+
+
+class ParcoursCard(BaseModel):
+    code: str
+    label: str
+    emoji: str
+    description: str | None = None
+    position: int
+    start_payload: str
+
+
+@router.get("/{tenant_slug}/parcours", response_model=list[ParcoursCard])
+async def list_public_parcours(
+    tenant_slug: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Liste des parcours actifs à afficher comme cartes dans le menu d'accueil
+    du chat web. Alimenté dynamiquement par les Workflow actifs en BD, trié
+    par `position`.
+
+    Chaque carte contient :
+    - `code` : identifiant stable (= workflow.id string)
+    - `label` : libellé court dérivé du nom (« M'inscrire », « Consulter mon dossier », …)
+    - `emoji` : emoji dérivé du nom (✨, 🔍, ✏️, 💬)
+    - `description` : phrase courte sous le label (= workflow.description)
+    - `position` : ordre d'affichage
+    - `start_payload` : texte envoyé au dispatcher quand on clique sur la carte,
+      calibré pour matcher le menu numérique (ex. "1", "2", …).
+    """
+    _enforce_origin_control(request)
+    stmt = select(Tenant).where(Tenant.slug == tenant_slug, Tenant.is_active.is_(True))
+    tenant = (await db.execute(stmt)).scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="tenant not found")
+
+    rows = (
+        await db.execute(
+            select(Workflow)
+            .where(Workflow.active.is_(True))
+            .order_by(Workflow.position.asc(), Workflow.created_at.asc())
+        )
+    ).scalars().all()
+
+    out: list[ParcoursCard] = []
+    for i, wf in enumerate(rows, start=1):
+        label = workflow_executor._short_label(wf.name)
+        emoji = workflow_executor._parcours_emoji(wf.name)
+        out.append(
+            ParcoursCard(
+                code=str(wf.id),
+                label=label,
+                emoji=emoji,
+                description=wf.description,
+                position=wf.position or 0,
+                # Payload spécial : le dispatcher charge directement CE workflow
+                # au lieu de supposer un menu numérique partagé (ce qui causait
+                # le cross-routing quand plusieurs parcours ont le même step
+                # code `consent_artci`).
+                start_payload=f"__wf__:{wf.id}",
+            )
+        )
+    return out
 
 
 # F-01 — canal anonyme : le pentest a démontré qu'un attaquant peut

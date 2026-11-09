@@ -1,0 +1,44 @@
+# Caches Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.egg-info
+
+# Environnement local
+.env
+.env.local
+.venv
+venv
+
+# Données locales / seeds runtime
+seeds/local
+*.sqlite
+*.db
+*.log
+
+# IDE
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Git
+.git
+.gitignore
+
+# Tests / dev tools
+tests
+htmlcov
+.coverage
+
+# Documentation
+*.md
+docs
+
+# Fichiers de génération MA2E_Livrables (non utilisés en prod)
+../MA2E_Livrables

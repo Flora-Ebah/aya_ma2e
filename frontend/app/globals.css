@@ -1,3 +1,20 @@
+/*
+ * Ordre d'import critique :
+ * 1. POC design system (contient ses propres tokens bleu GS2E dans sara.css)
+ * 2. tokens.css MA2E — override les 2 brand colors (vert + orange) après POC.
+ * Toujours importer tokens.css APRÈS poc-design/index.css.
+ */
+@import "./poc-design/index.css";
+@import "./tokens.css";
+
+/* Variables de polices GS2E — anciennement injectées par next/font/google.
+ * Fallback-chain : police Google si dispo, sinon stack système. */
+:root {
+  --font-outfit: "Outfit", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-sora: "Sora", "Outfit", system-ui, -apple-system, sans-serif;
+  --font-jetbrains-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -7,12 +24,16 @@
     height: 100%;
   }
   body {
-    font-feature-settings: "cv11", "ss01", "ss03";
+    background-color: rgb(var(--color-bg-canvas));
+    color: rgb(var(--color-text-primary));
+    font-feature-settings: "tnum", "kern";
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
+  h1, h2, h3, h4 { font-family: var(--font-heading); }
+  dialog, table, option, optgroup, svg text { font-family: inherit; }
   *:focus-visible {
-    outline: 2px solid theme("colors.primary.500");
+    outline: 2px solid rgb(var(--color-border-focus));
     outline-offset: 2px;
     border-radius: 6px;
   }
@@ -43,4 +64,19 @@
   .badge {
     @apply inline-flex items-center gap-1.5 text-[10.5px] font-normal px-2 py-0.5 rounded;
   }
+}
+
+/* Titres de cartes/sections (H5 du design system) : Sora comme les autres titres. */
+.sa-card__title--sm, .sa-h5 { font-family: var(--font-heading); }
+
+/* Mobile : matrice de permissions sans défilement horizontal */
+@media (max-width: 767px) {
+  .sa-table.sa-table--matrice th, .sa-table.sa-table--matrice td { padding-inline: 3px; font-size: 11px; letter-spacing: 0; }
+  .sa-table.sa-table--matrice th:first-child, .sa-table.sa-table--matrice td:first-child { min-width: 0; padding-left: 8px; }
+  .sa-table.sa-table--matrice .sa-badge { padding-inline: 4px; }
+}
+
+/* Mobile : tableaux compacts — marges de cellule réduites pour éviter tout défilement horizontal */
+@media (max-width: 767px) {
+  .sa-table.sa-table--compact th, .sa-table.sa-table--compact td { padding-inline: 8px; }
 }

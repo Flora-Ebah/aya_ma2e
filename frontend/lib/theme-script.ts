@@ -1,0 +1,2 @@
+/** Script exécuté avant le premier rendu pour éviter le flash de thème (voir app/layout.tsx). */
+export const THEME_INIT_SCRIPT = `(function(){try{var p=localStorage.getItem('ma2e-theme')||'system';var t=p;if(p==='system'){t=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}document.documentElement.setAttribute('data-theme',t);document.documentElement.setAttribute('data-theme-pref',p);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();`;

@@ -53,6 +53,21 @@ class Dossier(Base):
     rejection_motive: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     additional_request: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Marqueurs de priorisation côté back-office (US-13, US-17, US-36)
+    priority_review: Mapped[bool] = mapped_column(default=False, nullable=False)
+    priority_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # Numéro de sociétaire MA2E (US-19) — attribué à la validation, unique non
+    # réutilisable. Format : MEMB-AAAA-NNNNNN (ex. MEMB-2026-000042).
+    numero_societaire: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, unique=True)
+
+    # Soft-lock coopératif (US-17 AC3) : un dossier ne peut être traité que par
+    # un seul agent à la fois. Lock automatique à l'ouverture, TTL configurable.
+    locked_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     validated_by: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -145,7 +160,11 @@ class DonneesPro(Base):
 
 
 class Employeur(Base):
-    """Liste fermée des sociétés du périmètre MA2E."""
+    """Liste fermée des sociétés du périmètre MA2E.
+
+    Chaque société est rattachée à une boîte postale propre, pré-remplie
+    dans le formulaire d'inscription quand le sociétaire sélectionne sa société.
+    """
 
     __tablename__ = "employeurs"
     __table_args__ = (UniqueConstraint("tenant_id", "code", name="uq_employeur_code"),)
@@ -156,4 +175,5 @@ class Employeur(Base):
     )
     code: Mapped[str] = mapped_column(String(32), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    boite_postale: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)

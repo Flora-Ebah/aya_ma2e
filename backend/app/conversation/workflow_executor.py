@@ -68,6 +68,20 @@ class ExecuteResult:
     error: Optional[str] = None
     """Message d'erreur lisible (workflow inconnu, step manquante…)."""
 
+    ui: Optional[dict] = None
+    """Hint UI structuré (rendu riche côté web). Voir BotReply.ui."""
+
+
+async def list_active_workflows(db: AsyncSession) -> list[Workflow]:
+    """Tous les workflows actifs, triés par position puis date de création.
+    Utilisé pour construire le menu d'accueil WhatsApp."""
+    result = await db.execute(
+        select(Workflow)
+        .where(Workflow.active.is_(True))
+        .order_by(Workflow.position.asc(), Workflow.created_at.asc())
+    )
+    return list(result.scalars().all())
+
 
 async def load_active_workflow(db: AsyncSession) -> Optional[Workflow]:
     """Retourne le workflow actif de plus petite position.
@@ -114,10 +128,115 @@ def _build_step_index(workflow: Workflow) -> dict[str, WorkflowStep]:
     return {step.code: step for step in workflow.steps}
 
 
-def _validate_question_input(step: WorkflowStep, user_input: str) -> Optional[str]:
-    """Retourne `None` si valide, sinon un message d'erreur lisible."""
+async def _validate_question_input(
+    db: AsyncSession,
+    tenant_id: UUID,
+    step: WorkflowStep,
+    user_input: str,
+    ctx: dict,
+) -> Optional[str]:
+    """Retourne `None` si valide, sinon un message d'erreur lisible.
+
+    Si valide, enrichit `ctx` avec les valeurs résolues via référentiel
+    (code + label canonique) le cas échéant.
+    """
+    from app.services import reference_list_service
+
     rules = step.validation_rules or {}
     text = (user_input or "").strip()
+
+    # Mode multi-select : l'utilisateur envoie une liste CSV de codes/labels
+    # ("coordonnees,employeur"). On stocke la liste dans ctx[step.code+"_items"]
+    # pour que les steps conditionnels puissent filtrer dessus.
+    multi_opts = rules.get("multi_select")
+    multi_ref = rules.get("multi_select_ref")
+    if multi_opts or multi_ref:
+        parts = [p.strip() for p in text.split(",") if p.strip()]
+        if not parts:
+            return "Merci de sélectionner au moins une option."
+        min_s = int(rules.get("min_selected", 1))
+        max_s = int(rules.get("max_selected", 99))
+        if len(parts) < min_s:
+            return f"Veuillez sélectionner au moins {min_s} option(s)."
+        if len(parts) > max_s:
+            return f"Veuillez sélectionner au plus {max_s} option(s)."
+        # Résolution contre options disponibles
+        if multi_ref:
+            rl = await reference_list_service.get_list_by_key(db, tenant_id, multi_ref)
+            allowed = [it for it in (rl.items or [])] if rl else []
+        else:
+            allowed = list(multi_opts or [])
+        resolved_codes: list[str] = []
+        resolved_labels: list[str] = []
+        for part in parts:
+            match = None
+            low = part.lower()
+            for it in allowed:
+                code = str(it.get("code") or it.get("label") or "").lower()
+                label = str(it.get("label") or it.get("code") or "").lower()
+                if low == code or low == label:
+                    match = it
+                    break
+            if match is None:
+                return f"Option « {part} » non reconnue."
+            resolved_codes.append(str(match.get("code") or match.get("label")))
+            resolved_labels.append(str(match.get("label") or match.get("code")))
+        ctx[f"{step.code}_items"] = resolved_codes
+        ctx[f"{step.code}_items_labels"] = resolved_labels
+        ctx[step.code] = ", ".join(resolved_labels)
+        return None
+
+    # Mode « form batch » : la question envoie un modèle à copier/remplir,
+    # l'utilisateur renvoie plusieurs lignes `Label: valeur`.
+    form_fields = rules.get("form_fields")
+    if form_fields and isinstance(form_fields, list):
+        parsed, errors = _parse_form_response(text, form_fields)
+        # Validation complémentaire : pour chaque field lié à un référentiel,
+        # on résout la valeur fournie contre la liste.
+        for f in form_fields:
+            opts_ref = f.get("options_ref")
+            if not opts_ref:
+                continue
+            key = str(f.get("key") or "").strip()
+            if not key or key not in parsed:
+                continue  # champ manquant → déjà couvert par _parse_form_response
+            value = parsed[key]
+            rl = await reference_list_service.get_list_by_key(db, tenant_id, opts_ref)
+            if rl is None:
+                continue
+            resolved = reference_list_service.resolve_value(rl, value)
+            if resolved is None and not rl.allow_other:
+                items_hint = ", ".join(it.get("label", "") for it in (rl.items or [])[:6])
+                errors.append(
+                    f"« {f.get('label') or key} » : valeur « {value} » non reconnue. "
+                    f"Attendu : {items_hint}."
+                )
+            elif resolved is not None:
+                # Normalise la valeur dans le contexte (code technique) +
+                # version lisible.
+                ctx[key] = resolved["label"]
+                ctx[f"{key}_code"] = resolved["code"]
+        if errors:
+            return "\n".join(f"- {e}" for e in errors)
+        # Les valeurs normalisées remplacent celles brutes dans parsed.
+        return None
+
+    # Validation d'un step « question » simple avec options_ref
+    opts_ref = rules.get("options_ref")
+    if opts_ref:
+        rl = await reference_list_service.get_list_by_key(db, tenant_id, opts_ref)
+        if rl is not None:
+            resolved = reference_list_service.resolve_value(rl, text)
+            if resolved is None and not rl.allow_other:
+                items_hint = ", ".join(it.get("label", "") for it in (rl.items or [])[:6])
+                return (
+                    f"Valeur « {text} » non reconnue. "
+                    f"Attendu : {items_hint} (ou tapez le numéro)."
+                )
+            if resolved is not None:
+                ctx[step.code] = resolved["label"]
+                ctx[f"{step.code}_code"] = resolved["code"]
+            return None
 
     min_len = rules.get("min_len")
     if min_len is not None and len(text) < int(min_len):
@@ -136,6 +255,81 @@ def _validate_question_input(step: WorkflowStep, user_input: str) -> Optional[st
             logger.warning("Workflow step %s : regex invalide '%s' (%s)", step.code, regex, e)
 
     return None
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_DATE_RE = re.compile(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})$")
+
+
+def _parse_form_response(text: str, fields: list[dict]) -> tuple[dict, list[str]]:
+    """Parse une réponse multi-lignes du type :
+
+        Nom : KONATE
+        Prénoms : Bakary
+        Date de naissance : 12/05/1988
+
+    Retourne ({key: value}, [erreurs lisibles]). La clé de chaque champ est
+    `fields[i]["key"]` ; le `label` sert à retrouver la ligne dans la réponse.
+    Les champs `optional=true` manquants ne génèrent pas d'erreur.
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    collected: dict[str, str] = {}
+    for line in lines:
+        # Accepte « : » ou « ：» (fullwidth)
+        for sep in (":", "："):
+            if sep in line:
+                k, _, v = line.partition(sep)
+                key = _normalize_label(k)
+                val = v.strip()
+                if key and val:
+                    collected[key] = val
+                break
+
+    out: dict[str, str] = {}
+    errors: list[str] = []
+    for f in fields:
+        key = str(f.get("key") or "").strip()
+        label = str(f.get("label") or key).strip()
+        optional = bool(f.get("optional"))
+        candidates = {_normalize_label(label), _normalize_label(key)}
+        value = next((collected[c] for c in candidates if c in collected), None)
+
+        if not value:
+            if not optional:
+                errors.append(f"« {label} » est manquant.")
+            continue
+
+        regex = f.get("regex")
+        fmt = (f.get("format") or "").lower()
+        msg = f.get("message") or f"« {label} » : format invalide."
+
+        if regex:
+            try:
+                if not re.match(regex, value):
+                    errors.append(msg)
+                    continue
+            except re.error:
+                pass
+        if fmt == "email" and not _EMAIL_RE.match(value):
+            errors.append(f"« {label} » : adresse email invalide.")
+            continue
+        if fmt == "date" and not _DATE_RE.match(value):
+            errors.append(f"« {label} » : format JJ/MM/AAAA attendu.")
+            continue
+
+        out[key] = value
+    return out, errors
+
+
+def _normalize_label(s: str) -> str:
+    """Normalise un label pour la recherche : trim, lowercase, enlève accents
+    et parenthèses de type « (JJ/MM/AAAA) »."""
+    import unicodedata as _ud
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s*\([^)]*\)", "", s)  # enlève les parenthèses
+    s = _ud.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    s = re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+    return s
 
 
 # Détection courte du type de parcours d'après son nom — pour afficher dans
@@ -277,7 +471,7 @@ async def _system_variables(db: AsyncSession, tenant_id: UUID) -> dict[str, str]
 # l'utilisateur qu'il peut sortir d'une boucle (ex. attente d'une photo qu'il
 # n'a pas sous la main). Vu en bas de chaque prompt sauf sur les start-steps
 # qui sont déjà des menus.
-ESCAPE_HINT = "\n\n💡 _Tapez *MENU*, *STOP*, *ANNULER* ou *RECOMMENCER* à tout moment pour reprendre depuis le début._"
+ESCAPE_HINT = "\n\n_Tapez MENU, STOP, ANNULER ou RECOMMENCER à tout moment pour reprendre depuis le début._"
 
 # Steps de démarrage des différents workflows — ils SONT déjà des menus, pas
 # besoin d'ajouter un rappel "tapez MENU".
@@ -319,6 +513,317 @@ def _scrub_leaked_tokens(text: str) -> str:
     return _LEAKED_TOKEN_RE.sub("—", text)
 
 
+async def _resolve_field_options(
+    db: AsyncSession, tenant_id: UUID, field: dict,
+) -> list[dict]:
+    """Retourne la liste effective d'options {code, label} pour un champ,
+    en résolvant éventuellement `options_ref` contre les référentiels."""
+    opts = field.get("options") or []
+    if opts:
+        return [
+            {
+                "code": str(o.get("code") or o.get("label") or "").strip(),
+                "label": str(o.get("label") or o.get("code") or "").strip(),
+            }
+            for o in opts
+            if (o.get("code") or o.get("label"))
+        ]
+    ref = field.get("options_ref")
+    if not ref:
+        return []
+    from app.services import reference_list_service
+    rl = await reference_list_service.get_list_by_key(db, tenant_id, ref)
+    if rl is None:
+        return []
+    return [
+        {
+            "code": str(it.get("code") or it.get("label") or "").strip(),
+            "label": str(it.get("label") or it.get("code") or "").strip(),
+        }
+        for it in (rl.items or [])
+        if (it.get("code") or it.get("label"))
+    ]
+
+
+async def _build_wa_field_message(
+    db: AsyncSession,
+    tenant_id: UUID,
+    field: dict,
+    idx: int,
+    total: int,
+    intro: str = "",
+) -> tuple[str, Optional[dict]]:
+    """Construit (texte, ui_hint) pour l'envoi WhatsApp d'un champ unique.
+
+    - ≤3 options  → interactive buttons (ui_hint type `wa_buttons`)
+    - 4..10       → interactive list (ui_hint type `wa_list`)
+    - >10 / aucune → texte numéroté classique, ui_hint None
+
+    Le texte de repli (`messages=[text]`) reste toujours cohérent si le canal
+    décide d'ignorer le ui_hint.
+    """
+    label = field.get("label") or field.get("key") or "Information"
+    optional_suffix = " (facultatif, tapez * pour passer)" if field.get("optional") else ""
+    header_prefix = f"Question {idx + 1}/{total}"
+    body_core = f"*{header_prefix}*\n{label}{optional_suffix}"
+    body_with_intro = f"{intro}{body_core}" if intro else body_core
+
+    options = await _resolve_field_options(db, tenant_id, field)
+    if options:
+        # Meta : buttons title ≤20, list row title ≤24, body ≤1024.
+        if len(options) <= 3:
+            buttons = [
+                {"id": (o["code"] or o["label"])[:256], "title": (o["label"] or o["code"])[:20]}
+                for o in options
+            ]
+            text_fallback = (
+                f"{body_with_intro}\n\n"
+                + "\n".join(f"{i + 1}. {o['label']}" for i, o in enumerate(options))
+                + "\n\n_Touchez un bouton ou répondez par le numéro._"
+            )
+            ui = {
+                "type": "wa_buttons",
+                "body": body_with_intro[:1024],
+                "buttons": buttons,
+            }
+            return text_fallback, ui
+        if len(options) <= 10:
+            rows = [
+                {
+                    "id": (o["code"] or o["label"])[:200],
+                    "title": (o["label"] or o["code"])[:24],
+                }
+                for o in options
+            ]
+            text_fallback = (
+                f"{body_with_intro}\n\n"
+                + "\n".join(f"{i + 1}. {o['label']}" for i, o in enumerate(options))
+                + "\n\n_Touchez « Choisir » ou répondez par le numéro._"
+            )
+            ui = {
+                "type": "wa_list",
+                "body": body_with_intro[:1024],
+                "button": "Choisir",
+                "rows": rows,
+            }
+            return text_fallback, ui
+        # >10 : liste trop longue pour un composant natif, on dégrade en texte.
+        block = "\n".join(
+            f"{i + 1}. {o['label']}" for i, o in enumerate(options[:20])
+        )
+        return (
+            f"{body_with_intro}\n\n{block}\n\n_Répondez par le numéro ou le nom._",
+            None,
+        )
+
+    # Pas d'options : hint de format.
+    fmt = field.get("format")
+    hint_parts = []
+    if fmt == "date":
+        hint_parts.append("format JJ/MM/AAAA")
+    elif fmt == "email":
+        hint_parts.append("exemple : nom@domaine.com")
+    placeholder = field.get("placeholder") or ""
+    if placeholder:
+        hint_parts.append(placeholder)
+    hint = f"\n\n_({' · '.join(hint_parts)})_" if hint_parts else ""
+    return f"{body_with_intro}{hint}", None
+
+
+async def _normalize_wa_option_reply(
+    db: AsyncSession, tenant_id: UUID, field: dict, raw: str,
+) -> str:
+    """Si la réponse WhatsApp est un `id` de bouton/liste (code d'option) ou
+    un numéro dans la liste affichée, retourne le libellé correspondant. Sinon
+    renvoie `raw` tel quel. `_validate_single_field` normalise ensuite via
+    reference_list_service si un référentiel est en jeu.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return text
+    options = await _resolve_field_options(db, tenant_id, field)
+    if not options:
+        return text
+    # Match par code exact (id de bouton)
+    for o in options:
+        if text == o["code"]:
+            return o["label"] or o["code"]
+    # Match par numéro
+    if text.isdigit():
+        n = int(text)
+        if 1 <= n <= len(options):
+            return options[n - 1]["label"] or options[n - 1]["code"]
+    return text
+
+
+async def _validate_single_field(
+    db: AsyncSession,
+    tenant_id: UUID,
+    field: dict,
+    value: str,
+) -> Optional[str]:
+    """Validation d'un seul champ (regex, format, options_ref). Retourne None
+    si OK, sinon un message d'erreur lisible."""
+    from app.services import reference_list_service
+    text = (value or "").strip()
+    if not text or text == "*":
+        return None  # vide = facultatif ok, * = skip explicite
+    # options_ref
+    opts_ref = field.get("options_ref")
+    if opts_ref:
+        rl = await reference_list_service.get_list_by_key(db, tenant_id, opts_ref)
+        if rl is not None:
+            resolved = reference_list_service.resolve_value(rl, text)
+            if resolved is None and not rl.allow_other:
+                items_hint = ", ".join(it.get("label", "") for it in (rl.items or [])[:6])
+                return f"Valeur « {text} » non reconnue. Attendu : {items_hint}."
+            return None
+    # regex
+    regex = field.get("regex")
+    if regex:
+        import re as _re
+        try:
+            if not _re.search(regex, text):
+                return field.get("message") or f"Format invalide pour « {field.get('label')} »."
+        except Exception:
+            pass
+    # format email
+    if field.get("format") == "email":
+        if "@" not in text or "." not in text.split("@")[-1]:
+            return "Adresse email invalide."
+    return None
+
+
+async def _build_ui_hint(
+    db: AsyncSession,
+    tenant_id: UUID,
+    step: WorkflowStep,
+    ctx: Optional[dict] = None,
+) -> Optional[dict]:
+    """Construit un hint UI structuré pour un step `question`.
+
+    - `form_fields` → formulaire multi-champs, chaque champ lié ou non à une
+      liste de référence (rendue en select).
+    - `options_ref` simple → select mono-champ.
+    - Rien de pertinent → None (le canal rend juste le texte).
+    """
+    if step.type != WorkflowStepType.question:
+        return None
+    rules = step.validation_rules or {}
+    form_fields = rules.get("form_fields")
+    opts_ref = rules.get("options_ref")
+
+    # Détection « step de signature » : code ou label contient « signature ».
+    # Le moteur attend un upload (media_url), on propose au front deux modes :
+    # dessin au doigt/souris OU upload fichier.
+    code_lo = (step.code or "").lower()
+    label_lo = (step.label or "").lower()
+    description = (step.meta or {}).get("description") or ""
+    if "signature" in code_lo or "signature" in label_lo:
+        if not form_fields and not opts_ref:
+            return {
+                "type": "signature",
+                "title": step.label or "Signature",
+                "description": description,
+            }
+
+    from app.services import reference_list_service
+
+    async def _resolve_options(key: str) -> tuple[list[dict], bool]:
+        rl = await reference_list_service.get_list_by_key(db, tenant_id, key)
+        if rl is None:
+            return [], False
+        items = [
+            {"code": it.get("code") or it.get("label"), "label": it.get("label") or it.get("code")}
+            for it in (rl.items or [])
+            if (it.get("code") or it.get("label"))
+        ]
+        return items, bool(rl.allow_other)
+
+    # Détection multi-select (parcours de mise à jour par exemple).
+    multi_opts = rules.get("multi_select")
+    multi_ref = rules.get("multi_select_ref")
+    if multi_opts or multi_ref:
+        if multi_ref:
+            m_options, _ = await _resolve_options(multi_ref)
+        else:
+            m_options = [
+                {"code": o.get("code") or o.get("label"), "label": o.get("label") or o.get("code")}
+                for o in (multi_opts or [])
+                if o.get("code") or o.get("label")
+            ]
+        if m_options:
+            return {
+                "type": "multi-select",
+                "title": step.label or "",
+                "description": description,
+                "options": m_options,
+                "min": int(rules.get("min_selected", 1)),
+                "max": int(rules.get("max_selected", len(m_options))),
+                "name": step.code,
+            }
+
+    if form_fields and isinstance(form_fields, list):
+        out_fields: list[dict] = []
+        for f in form_fields:
+            name = f.get("name") or f.get("key") or f.get("label") or ""
+            label = f.get("label") or name
+            ftype = (f.get("type") or "text").lower()
+            # Compat : le LLM produit `optional: bool`, le front attend `required`.
+            # On accepte les deux et on prend "required" prioritaire si présent.
+            if "required" in f:
+                required = bool(f.get("required"))
+            else:
+                required = not bool(f.get("optional", False))
+            placeholder = f.get("placeholder") or ""
+            field_opts_ref = f.get("options_ref")
+            # Pré-remplissage : si ctx contient `current_<name>` ou `<name>`,
+            # on l'injecte comme valeur par défaut (parcours de mise à jour).
+            default_value = ""
+            if ctx:
+                key_norm = (f.get("key") or name).lower()
+                for k in (f"current_{key_norm}", key_norm, f.get("key") or ""):
+                    v = ctx.get(k)
+                    if v not in (None, ""):
+                        default_value = str(v)
+                        break
+            options: list[dict] = []
+            allow_other = False
+            if field_opts_ref:
+                options, allow_other = await _resolve_options(field_opts_ref)
+                if options and ftype in ("text", ""):
+                    ftype = "select"
+            out_fields.append({
+                "name": name,
+                "label": label,
+                "type": ftype,
+                "required": required,
+                "placeholder": placeholder,
+                "options": options,
+                "allow_other": allow_other,
+                "default": default_value,
+            })
+        return {
+            "type": "form",
+            "title": step.label or "",
+            "description": description,
+            "fields": out_fields,
+        }
+
+    if opts_ref:
+        options, allow_other = await _resolve_options(opts_ref)
+        if options:
+            return {
+                "type": "select",
+                "name": step.code,
+                "label": step.label or "",
+                "description": description,
+                "options": options,
+                "allow_other": allow_other,
+            }
+    return None
+
+
 async def _render_or_fallback(
     db: AsyncSession,
     tenant_id: UUID,
@@ -339,6 +844,21 @@ async def _render_or_fallback(
     sys_vars = await _system_variables(db, tenant_id)
     variables = {**sys_vars, **{k: str(v) for k, v in context.items() if v is not None}}
 
+    # Pour un step simple lié à un référentiel, on prépare le bloc d'options
+    # numérotées à concaténer à la question rendue.
+    options_block = ""
+    rules = step.validation_rules or {}
+    opts_ref = rules.get("options_ref")
+    if opts_ref and not rules.get("form_fields"):
+        from app.services import reference_list_service
+        rl = await reference_list_service.get_list_by_key(db, tenant_id, opts_ref)
+        if rl is not None:
+            block = reference_list_service.render_options_block(rl)
+            if block:
+                options_block = "\n\n" + block
+                if rl.allow_other:
+                    options_block += "\n\nVous pouvez aussi saisir votre propre réponse."
+
     # 1) Essai sur le service workflow (BD directe, sans registry)
     raw = await workflow_template_service.get_content(db, tenant_id, template_code)
     if raw is not None and raw.strip():
@@ -348,6 +868,8 @@ async def _render_or_fallback(
         except Exception:
             body = raw
         body = _scrub_leaked_tokens(body)
+        if options_block:
+            body = body + options_block
         if _should_show_escape_hint(step, context):
             body = body + ESCAPE_HINT
         return body
@@ -360,6 +882,8 @@ async def _render_or_fallback(
             )
             if content:
                 content = _scrub_leaked_tokens(content)
+                if options_block:
+                    content = content + options_block
                 if _should_show_escape_hint(step, context):
                     content = content + ESCAPE_HINT
                 return content
@@ -371,6 +895,8 @@ async def _render_or_fallback(
 
     # 3) Fallback ultime : libellé entre crochets
     fallback = f"[{_scrub_leaked_tokens(step.label or '')}]"
+    if options_block:
+        fallback += options_block
     if _should_show_escape_hint(step, context):
         fallback += ESCAPE_HINT
     return fallback
@@ -513,6 +1039,8 @@ async def execute(
     ctx["_tenant_id"] = str(tenant_id)
     out_messages: list[str] = []
 
+    is_whatsapp = ctx.get("_channel") == "whatsapp"
+
     # ---- Phase 1 : si on est sur une question, consommer la réponse
     if current_step_code:
         current = steps_by_code.get(current_step_code)
@@ -522,20 +1050,111 @@ async def execute(
                 context=ctx,
             )
 
-        if current.type == WorkflowStepType.question:
-            error = _validate_question_input(current, user_input or "")
+        # WhatsApp : si on est sur un step form_fields en cours de split,
+        # on gère les champs UN PAR UN. ctx["_wa_form_step"] / ctx["_wa_form_idx"].
+        wa_form_finished = False
+        if is_whatsapp and current.type == WorkflowStepType.question:
+            rules = current.validation_rules or {}
+            form_fields = rules.get("form_fields")
+            if form_fields and isinstance(form_fields, list):
+                wa_state = ctx.get("_wa_form_step")
+                wa_idx = int(ctx.get("_wa_form_idx") or 0)
+                if wa_state == current.code and wa_idx < len(form_fields):
+                    current_field = form_fields[wa_idx]
+                    raw_input = (user_input or "").strip()
+                    is_optional = bool(current_field.get("optional"))
+                    if not raw_input and not is_optional:
+                        reprompt_text, reprompt_ui = await _build_wa_field_message(
+                            db, tenant_id, current_field, wa_idx, len(form_fields),
+                            intro=f"« {current_field.get('label')} » : valeur attendue.\n\n",
+                        )
+                        return ExecuteResult(
+                            messages=[reprompt_text],
+                            next_step_code=current.code,
+                            ui=reprompt_ui,
+                            context=ctx,
+                        )
+                    # Normalise la réponse si c'est un id de bouton WhatsApp (code
+                    # d'option) ou un numéro — on stocke la version propre.
+                    normalized = await _normalize_wa_option_reply(
+                        db, tenant_id, current_field, raw_input,
+                    )
+                    field_err = await _validate_single_field(db, tenant_id, current_field, normalized)
+                    if field_err:
+                        err_text, err_ui = await _build_wa_field_message(
+                            db, tenant_id, current_field, wa_idx, len(form_fields),
+                            intro=f"{field_err}\n\n",
+                        )
+                        return ExecuteResult(
+                            messages=[err_text],
+                            next_step_code=current.code,
+                            ui=err_ui,
+                            context=ctx,
+                        )
+                    field_key = current_field.get("key") or current_field.get("name") or f"field_{wa_idx}"
+                    if normalized:
+                        ctx[field_key] = normalized
+                    wa_idx += 1
+                    if wa_idx < len(form_fields):
+                        ctx["_wa_form_idx"] = wa_idx
+                        next_text, next_ui = await _build_wa_field_message(
+                            db, tenant_id, form_fields[wa_idx], wa_idx, len(form_fields),
+                        )
+                        return ExecuteResult(
+                            messages=[next_text],
+                            next_step_code=current.code,
+                            ui=next_ui,
+                            context=ctx,
+                        )
+                    # Form terminé : nettoie l'état, laisse continuer normalement
+                    ctx.pop("_wa_form_step", None)
+                    ctx.pop("_wa_form_idx", None)
+                    wa_form_finished = True
+
+        if current.type == WorkflowStepType.question and not wa_form_finished:
+            error = await _validate_question_input(
+                db, tenant_id, current, user_input or "", ctx
+            )
             if error:
                 # Reste sur la même question, mais ajoute le message d'erreur
                 # devant le re-prompt du template
                 reprompt = await _render_or_fallback(db, tenant_id, current, ctx)
+                ui_hint = await _build_ui_hint(db, tenant_id, current, ctx)
                 return ExecuteResult(
-                    messages=[f"⚠️ {error}\n\n{reprompt}"],
+                    messages=[f"{error}\n\n{reprompt}"],
                     next_step_code=current.code,
+                    ui=ui_hint,
                     context=ctx,
                 )
             # Stocke la réponse dans le contexte sous une clé déduite du code
             ctx[current.code] = (user_input or "").strip()
             ctx[f"{current.code}_input"] = (user_input or "").strip()
+
+            # Si l'utilisateur a envoyé un média (upload / signature canvas), on
+            # archive l'URL sous une clé spécifique à l'étape pour que les
+            # actions suivantes (create_real_dossier, OCR…) puissent la retrouver
+            # même après plusieurs uploads successifs (sinon `last_media_url`
+            # est écrasé à chaque tour).
+            media_url = ctx.get("last_media_url")
+            if media_url and ctx.get("last_has_media"):
+                ctx[f"{current.code}_media_url"] = media_url
+                # Alias courants attendus par les actions existantes.
+                code_lo = current.code.lower()
+                if "recto" in code_lo and not ctx.get("recto_media_url"):
+                    ctx["recto_media_url"] = media_url
+                elif "verso" in code_lo and not ctx.get("verso_media_url"):
+                    ctx["verso_media_url"] = media_url
+                elif "signature" in code_lo and not ctx.get("signature_media_url"):
+                    ctx["signature_media_url"] = media_url
+
+            # Mode « form batch » : extrait chaque champ du formulaire dans
+            # le contexte sous sa propre clé pour que les actions suivantes
+            # (build_recap, OCR cross-check, sauvegarde dossier) y accèdent.
+            form_fields = (current.validation_rules or {}).get("form_fields")
+            if form_fields and isinstance(form_fields, list):
+                parsed, _ = _parse_form_response(user_input or "", form_fields)
+                for key, value in parsed.items():
+                    ctx[key] = value
 
             # Résolveur dynamique : si le step est marqué `meta.dynamic_router =
             # "by_workflow_position"`, on résout vers le bon handoff selon le
@@ -585,7 +1204,11 @@ async def execute(
                 next_code = _resolve_next_code(current, branch)
         else:
             # current n'est pas une question — on enchaîne depuis lui (cas exotique)
-            next_code = current.code
+            # OU on vient de terminer un form WhatsApp → on avance au next_step_code
+            if wa_form_finished:
+                next_code = current.next_step_code
+            else:
+                next_code = current.code
     else:
         # Démarrage du parcours
         next_code = workflow.start_step_code
@@ -607,6 +1230,29 @@ async def execute(
                 is_terminal=True,
                 context=ctx,
             )
+
+        # Skip conditionnel : si `step.meta.show_when` = {"key": "...", "in": "..."}
+        # et que ctx[key] ne contient pas la valeur, on saute ce step vers son
+        # next_step_code. Utilisé par les parcours de mise à jour où chaque
+        # domaine (coordonnées, employeur…) n'apparaît que si coché au multi-select.
+        gate = (step.meta or {}).get("show_when")
+        if isinstance(gate, dict):
+            gate_key = gate.get("key")
+            gate_val = gate.get("in") or gate.get("equals")
+            if gate_key and gate_val is not None:
+                ctx_val = ctx.get(gate_key)
+                matches = False
+                if isinstance(ctx_val, (list, tuple)):
+                    matches = gate_val in ctx_val
+                elif isinstance(ctx_val, str):
+                    matches = gate_val == ctx_val or gate_val in [p.strip() for p in ctx_val.split(",")]
+                if not matches:
+                    logger.info(
+                        "Step %s skippé (show_when %s=%s, ctx=%r)",
+                        step.code, gate_key, gate_val, ctx_val,
+                    )
+                    next_code = step.next_step_code
+                    continue
 
         if step.type == WorkflowStepType.message:
             text = await _render_or_fallback(db, tenant_id, step, ctx)
@@ -634,11 +1280,46 @@ async def execute(
             continue
 
         if step.type == WorkflowStepType.question:
+            # WhatsApp + form_fields → initialise le split et demande le 1er champ
+            if is_whatsapp:
+                rules = step.validation_rules or {}
+                form_fields = rules.get("form_fields")
+                if form_fields and isinstance(form_fields, list) and len(form_fields) > 0:
+                    intro = ""
+                    desc = (step.meta or {}).get("description") or ""
+                    if desc:
+                        intro = f"*{step.label}*\n{desc}\n\n"
+                    elif step.label:
+                        intro = f"*{step.label}*\n\n"
+                    ctx["_wa_form_step"] = step.code
+                    ctx["_wa_form_idx"] = 0
+                    first_text, first_ui = await _build_wa_field_message(
+                        db, tenant_id, form_fields[0], 0, len(form_fields),
+                        intro=intro,
+                    )
+                    # Si un ui interactif est émis, on garde seulement ce message
+                    # (le body embarque déjà l'intro) pour éviter deux bulles.
+                    if first_ui is not None:
+                        return ExecuteResult(
+                            messages=out_messages + [first_text],
+                            next_step_code=step.code,
+                            ui=first_ui,
+                            context=ctx,
+                        )
+                    out_messages.append(first_text)
+                    return ExecuteResult(
+                        messages=out_messages,
+                        next_step_code=step.code,
+                        context=ctx,
+                    )
+
             text = await _render_or_fallback(db, tenant_id, step, ctx)
             out_messages.append(text)
+            ui_hint = await _build_ui_hint(db, tenant_id, step, ctx)
             return ExecuteResult(
                 messages=out_messages,
                 next_step_code=step.code,
+                ui=ui_hint,
                 context=ctx,
             )
 

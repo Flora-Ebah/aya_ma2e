@@ -109,6 +109,10 @@ async def whatsapp_webhook(request: Request, db: AsyncSession = Depends(get_db))
     access_token = channel_record.credentials.get("access_token")
 
     msg_type = msg.get("type")
+    logger.info(
+        "WA-IN from=%s type=%s tenant=%s state_before=%s",
+        from_phone, msg_type, tenant.slug, conversation.state,
+    )
     if msg_type == "text":
         text = msg["text"]["body"]
     elif msg_type == "interactive":
@@ -135,30 +139,134 @@ async def whatsapp_webhook(request: Request, db: AsyncSession = Depends(get_db))
         text=text, has_media=has_media, media_url=media_url,
     )
 
+    logger.info(
+        "WA-OUT to=%s state_after=%s reply=%r",
+        from_phone, conversation.state, (reply.text or "")[:80],
+    )
     if reply.text and access_token:
-        await _send_whatsapp_message(access_token, phone_number_id, from_phone, reply.text)
+        await _send_whatsapp_message(
+            access_token, phone_number_id, from_phone, reply.text, ui=reply.ui,
+        )
         await conv_utils.record_message(
             db, tenant.id, conversation, MessageDirection.outbound,
             content=reply.text,
         )
+    elif reply.text and not access_token:
+        logger.error("WA-OUT impossible : access_token absent dans tenant_channel.credentials")
 
     await db.commit()
     return {"ok": True}
 
 
-async def _send_whatsapp_message(access_token: str, phone_number_id: str, to: str, text: str) -> None:
+async def _send_whatsapp_message(
+    access_token: str,
+    phone_number_id: str,
+    to: str,
+    text: str,
+    ui: Optional[dict] = None,
+) -> None:
+    """Envoie un message WhatsApp — interactive buttons/list quand `ui` le
+    demande, sinon texte simple. Le `text` reste le fallback si Meta refuse
+    la charge interactive (ex. contact hors fenêtre 24h → interactive bloqué).
+    """
     url = f"https://graph.facebook.com/v21.0/{phone_number_id}/messages"
     headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-    body = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": text[:4096]},
-    }
+
+    body: dict
+    body = _build_interactive_body(to, ui) if ui else None
+    if body is None:
+        body = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "text",
+            "text": {"body": text[:4096]},
+        }
+
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.post(url, json=body, headers=headers)
         if resp.status_code >= 400:
-            logger.error("whatsapp send failed: %s %s", resp.status_code, resp.text)
+            logger.error(
+                "whatsapp send failed (%s): %s %s",
+                body.get("type"), resp.status_code, resp.text,
+            )
+            # Fallback texte si l'interactive a été rejeté par Meta.
+            if body.get("type") == "interactive":
+                logger.info("Repli WA interactive → texte")
+                fallback = {
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "text",
+                    "text": {"body": text[:4096]},
+                }
+                resp2 = await client.post(url, json=fallback, headers=headers)
+                if resp2.status_code >= 400:
+                    logger.error("whatsapp text fallback failed: %s %s",
+                                 resp2.status_code, resp2.text)
+
+
+def _build_interactive_body(to: str, ui: dict) -> Optional[dict]:
+    """Traduit un ui_hint `wa_buttons` / `wa_list` en payload Meta
+    `interactive`. Retourne None si le hint n'est pas supporté → le caller
+    enverra le texte simple."""
+    ui_type = ui.get("type")
+    body_text = (ui.get("body") or "")[:1024]
+
+    if ui_type == "wa_buttons":
+        raw_buttons = ui.get("buttons") or []
+        buttons = []
+        for b in raw_buttons[:3]:  # Meta : max 3 boutons
+            bid = str(b.get("id") or "").strip()[:256]
+            title = str(b.get("title") or "").strip()[:20]
+            if not bid or not title:
+                continue
+            buttons.append({
+                "type": "reply",
+                "reply": {"id": bid, "title": title},
+            })
+        if not buttons:
+            return None
+        return {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body_text or "Choisissez une option"},
+                "action": {"buttons": buttons},
+            },
+        }
+
+    if ui_type == "wa_list":
+        raw_rows = ui.get("rows") or []
+        rows = []
+        for r in raw_rows[:10]:  # Meta : max 10 lignes dans une section
+            rid = str(r.get("id") or "").strip()[:200]
+            title = str(r.get("title") or "").strip()[:24]
+            description = str(r.get("description") or "").strip()[:72]
+            if not rid or not title:
+                continue
+            row = {"id": rid, "title": title}
+            if description:
+                row["description"] = description
+            rows.append(row)
+        if not rows:
+            return None
+        button_label = (str(ui.get("button") or "Choisir").strip() or "Choisir")[:20]
+        return {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "body": {"text": body_text or "Choisissez une option"},
+                "action": {
+                    "button": button_label,
+                    "sections": [{"title": "Options", "rows": rows}],
+                },
+            },
+        }
+
+    return None
 
 
 async def _download_whatsapp_media(access_token: str, media_id: str, tenant_slug: str, file_name: Optional[str]) -> Optional[str]:

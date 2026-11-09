@@ -10,6 +10,7 @@ from uuid import UUID
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.request_context import current as current_request
 from app.models import AuditAction, AuditLog
 
 
@@ -46,10 +47,15 @@ async def log(
     details = details or {}
     entry_hash = _hash_entry(tenant_id, action.value, resource_id, details, previous_hash)
 
+    # Récupère le contexte HTTP courant (rempli par RequestContextMiddleware)
+    req = current_request()
+
     entry = AuditLog(
         tenant_id=tenant_id,
         actor_type=actor_type,
         actor_id=actor_id,
+        ip_address=req.ip_address,
+        user_agent=req.user_agent,
         action=action,
         resource_type=resource_type,
         resource_id=resource_id,

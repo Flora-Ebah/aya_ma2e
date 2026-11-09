@@ -146,10 +146,12 @@ class Settings(BaseSettings):
             if self.database_url.startswith(old):
                 self.database_url = self.database_url.replace(old, "postgresql+asyncpg://", 1)
                 break
-        # Auto-derive the sync URL (used by Alembic) when not explicitly set
+        # Auto-derive the sync URL (used by Alembic) when not explicitly set.
+        # On force +psycopg2 car SQLAlchemy 2.x prend `psycopg` (v3) par défaut
+        # pour `postgresql://`, et seul psycopg2-binary est installé.
         if not self.database_url_sync:
             self.database_url_sync = self.database_url.replace(
-                "postgresql+asyncpg://", "postgresql://"
+                "postgresql+asyncpg://", "postgresql+psycopg2://"
             )
         # Minio expects host:port only — strip any scheme or trailing slash
         for scheme in ("https://", "http://"):

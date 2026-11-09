@@ -26,6 +26,10 @@ class DonneesProOut(BaseModel):
     anciennete_annees: Optional[int]
     situation_familiale: Optional[str]
     nombre_ayants_droit: int
+    # Champs additionnels (civilité, état civil, contacts, ayants droit, etc.)
+    # stockés dans le JSONB `extra` pour rester souple sans migration BD à
+    # chaque ajout de champ dans le formulaire.
+    extra: dict = {}
 
     class Config:
         from_attributes = True
@@ -47,6 +51,7 @@ class ConsentementOut(BaseModel):
 class DossierListItem(BaseModel):
     id: UUID
     dossier_number: str
+    numero_societaire: Optional[str] = None
     status: str
     matricule: Optional[str]
     employeur_code: Optional[str]
@@ -54,9 +59,26 @@ class DossierListItem(BaseModel):
     end_user_contact: Optional[str] = None
     submitted_at: Optional[datetime]
     created_at: datetime
+    updated_at: Optional[datetime] = None
+    # US-13, US-17 et US-36
+    priority_review: bool = False
+    priority_reason: Optional[str] = None
+    # US-17 AC3 — soft-lock visible côté UI
+    locked: bool = False
+    locked_by: Optional[UUID] = None
+    locked_at: Optional[datetime] = None
+    # US-17 règle "> 48h prioritaire" — affichable côté UI
+    age_hours: Optional[float] = None
+    is_overdue: bool = False  # > 48h soumis sans décision
 
     class Config:
         from_attributes = True
+
+
+class DossierListResponse(BaseModel):
+    items: list[DossierListItem]
+    summary: dict  # KPI synthétiques recalculés en tête de liste (US-38 AC3)
+    filters_applied: dict  # US-38 AC4 : reflet des filtres dans la réponse
 
 
 class AuditEntryOut(BaseModel):

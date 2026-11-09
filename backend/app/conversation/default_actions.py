@@ -658,19 +658,59 @@ async def create_real_dossier(
         )
 
     try:
-        dossier = await dossier_service.get_or_create_dossier(db, tenant, end_user, conversation)
+        # Mode mise à jour : si lookup_societaire a résolu un dossier existant,
+        # on le patche au lieu d'en créer un nouveau.
+        update_mode = bool(context.get("_update_mode"))
+        update_dossier_id = context.get("_update_dossier_id")
+        dossier = None
+        if update_mode and update_dossier_id:
+            from uuid import UUID as _UUID
+            from sqlalchemy import select as _select
+            from sqlalchemy.orm import selectinload as _selectinload
+            try:
+                dossier = (
+                    await db.execute(
+                        _select(Dossier)
+                        .options(_selectinload(Dossier.donnees_pro))
+                        .where(Dossier.id == _UUID(update_dossier_id))
+                    )
+                ).scalar_one_or_none()
+            except Exception:
+                dossier = None
+            if dossier is not None:
+                # Récupère l'EndUser du dossier existant plutôt que celui de la conversation
+                existing_eu = (
+                    await db.execute(select(EndUser).where(EndUser.id == dossier.end_user_id))
+                ).scalar_one_or_none()
+                if existing_eu:
+                    end_user = existing_eu
+                logger.info(
+                    "create_real_dossier : mode UPDATE sur dossier existant %s",
+                    dossier.dossier_number,
+                )
 
-        # ── Matricule : lit la saisie utilisateur (ask_matricule) ──
-        dossier.matricule = (
-            context.get("ask_matricule") or context.get("matricule")
-            or dossier.matricule
-        )
+        if dossier is None:
+            dossier = await dossier_service.get_or_create_dossier(db, tenant, end_user, conversation)
 
-        # ── Employeur : résout le numéro de choix (ex. "5") → code société ──
-        # Le step ask_employeur affiche une liste triée alphabétiquement par
-        # name. La saisie utilisateur est l'index 1-based dans cette liste.
-        ask_emp = (context.get("ask_employeur") or "").strip()
-        if ask_emp.isdigit():
+        # Fonction helper pour chercher une clé dans plusieurs variantes.
+        # Compat ancien schéma (`ask_xxx`) + nouveau schéma LLM (form_fields).
+        def _ctx_first(keys: list[str]) -> str:
+            for k in keys:
+                v = context.get(k)
+                if v and str(v).strip() and str(v).strip() != "*":
+                    return str(v).strip()
+            return ""
+
+        # ── Matricule ──
+        mat = _ctx_first([
+            "ask_matricule", "matricule", "matricule_gs2e", "matricule_societaire",
+        ])
+        if mat:
+            dossier.matricule = mat
+
+        # ── Employeur : accepte un index numérique OU le libellé direct ──
+        ask_emp = _ctx_first(["ask_employeur", "employeur", "societe_employeur"])
+        if ask_emp:
             from app.models import Employeur
             from sqlalchemy import select as _select
             employeurs_q = await db.execute(
@@ -679,36 +719,63 @@ async def create_real_dossier(
                 .order_by(Employeur.name)
             )
             employeurs = list(employeurs_q.scalars().all())
-            idx = int(ask_emp) - 1
-            if 0 <= idx < len(employeurs):
-                emp = employeurs[idx]
-                dossier.employeur_code = emp.code
-                logger.info("Employeur résolu : choix %s → %s", ask_emp, emp.code)
+            if ask_emp.isdigit():
+                idx = int(ask_emp) - 1
+                if 0 <= idx < len(employeurs):
+                    dossier.employeur_code = employeurs[idx].code
             else:
-                logger.warning("Choix employeur '%s' hors liste (%d)", ask_emp, len(employeurs))
-        elif ask_emp:
-            # Si l'utilisateur a tapé le nom directement
-            dossier.employeur_code = ask_emp
+                # Essaie match par code puis par name (insensible à la casse)
+                low = ask_emp.lower()
+                match = next(
+                    (e for e in employeurs if e.code.lower() == low or e.name.lower() == low),
+                    None,
+                )
+                dossier.employeur_code = match.code if match else ask_emp
 
-        # === Nom + prénoms → EndUser ===
-        nom = (context.get("ask_nom") or "").strip()
-        prenoms = (context.get("ask_prenoms") or "").strip()
+        nom = _ctx_first([
+            "ask_nom", "nom_de_famille", "nom", "nom_famille", "last_name",
+        ])
+        prenoms = _ctx_first([
+            "ask_prenoms", "prenoms", "prenom", "first_name", "firstname",
+        ])
         if nom or prenoms:
             end_user.name = f"{prenoms} {nom}".strip()
 
-        # === Téléphone 1 + email → EndUser ===
-        if context.get("ask_telephone1") and not end_user.phone:
-            end_user.phone = context["ask_telephone1"].strip()
-        email = context.get("email_for_otp") or context.get("ask_email")
+        # === Téléphones + email → EndUser ===
+        # On accepte toutes les variantes (cellulaire, domicile, bureau, principal)
+        # et on les stocke dans end_user.extra pour que la fiche sociétaire
+        # puisse les afficher même quand le dossier existant n'en avait pas.
+        tel_princ = _ctx_first([
+            "ask_telephone1", "numero_de_telephone", "telephone", "num_telephone",
+            "phone", "numero_telephone", "telephone_cellulaire",
+            "telephone_principal", "numero_telephone_principal",
+        ])
+        if tel_princ:
+            # Principal : on l'écrit toujours (update autorise à le changer)
+            end_user.phone = tel_princ
+        email = _ctx_first([
+            "email_for_otp", "ask_email", "adresse_email", "email",
+            "e_mail", "mail",
+        ])
+        extra = dict(end_user.extra or {})
         if email:
-            extra = dict(end_user.extra or {})
-            extra["email"] = email.strip()
-            if context.get("ask_telephone2") and context["ask_telephone2"].strip() not in ("*", ""):
-                extra["telephone2"] = context["ask_telephone2"].strip()
-            end_user.extra = extra
+            extra["email"] = email
+        for key, aliases in [
+            ("telephone_domicile", ["telephone_du_domicile", "telephone_domicile", "tel_domicile"]),
+            ("telephone_bureau",   ["telephone_du_bureau", "telephone_bureau", "tel_bureau"]),
+            ("telephone_cellulaire", ["telephone_cellulaire", "cellulaire", "mobile"]),
+            ("telephone2",         ["ask_telephone2", "telephone_secondaire", "telephone_2"]),
+        ]:
+            v = _ctx_first(aliases)
+            if v:
+                extra[key] = v
+        end_user.extra = extra
 
         # === Données pro + champs additionnels → DonneesPro ===
-        # Mapping civilité / situation matri / type pièce / catégorie
+        # Mapping utilisé pour les anciens parcours qui envoyaient des indices
+        # numériques ("1"/"2"/"3"). Le nouveau schéma LLM envoie directement
+        # les libellés résolus (ex. "Mlle", "Célibataire", "CNI"), d'où le
+        # fallback sur la chaîne telle quelle.
         _CIVILITE_MAP = {"1": "M.", "2": "Mme", "3": "Mlle"}
         _SITUATION_MAP = {"1": "celibataire", "2": "marie", "3": "divorce", "4": "veuf"}
         _PIECE_MAP = {"1": "cni", "2": "passeport", "3": "attestation"}
@@ -717,55 +784,155 @@ async def create_real_dossier(
             "4": "M1-M2", "5": "EO",
         }
 
+        def _norm_situation(val: str) -> str:
+            v = (val or "").strip().lower().replace("(e)", "").replace("(ve)", "")
+            if "cel" in v: return "celibataire"
+            if "div" in v: return "divorce"
+            if "veuf" in v or "veuv" in v: return "veuf"
+            if "mari" in v or "union" in v: return "marie"
+            return val
+
         extra_data = {}
-        # Champs typés
-        if context.get("ask_civilite"):
-            extra_data["civilite"] = _CIVILITE_MAP.get(
-                context["ask_civilite"].strip(), context["ask_civilite"].strip(),
-            )
-        if context.get("ask_date_naissance"):
-            extra_data["date_naissance"] = context["ask_date_naissance"].strip()
-        if context.get("ask_lieu_naissance"):
-            extra_data["lieu_naissance"] = context["ask_lieu_naissance"].strip()
-        if context.get("ask_type_piece"):
-            extra_data["type_piece"] = _PIECE_MAP.get(
-                context["ask_type_piece"].strip(), context["ask_type_piece"].strip(),
-            )
-        if context.get("ask_numero_piece"):
-            extra_data["numero_piece"] = context["ask_numero_piece"].strip()
-        if context.get("ask_direction_service"):
-            extra_data["direction_service"] = context["ask_direction_service"].strip()
-        if context.get("ask_boite_postale"):
-            extra_data["boite_postale_choisie"] = context["ask_boite_postale"].strip()
-        if context.get("ask_nom_conjoint"):
-            v = context["ask_nom_conjoint"].strip()
-            if v and v != "*":
-                extra_data["nom_conjoint"] = v
-        if context.get("ask_nom_personne_prev"):
-            extra_data["personne_a_prevenir"] = context["ask_nom_personne_prev"].strip()
-        if context.get("ask_contact1_prev"):
-            extra_data["contact_prevenir_1"] = context["ask_contact1_prev"].strip()
-        if context.get("ask_contact2_prev"):
-            v = context["ask_contact2_prev"].strip()
-            if v and v != "*":
-                extra_data["contact_prevenir_2"] = v
-        if context.get("ask_ayant_droit"):
-            extra_data["ayants_droit"] = context["ask_ayant_droit"].strip()
-        if context.get("ask_categorie"):
-            extra_data["categorie"] = _CATEGORIE_MAP.get(
-                context["ask_categorie"].strip(), context["ask_categorie"].strip(),
-            )
-        if context.get("ask_nom_mere"):
-            extra_data["nom_mere"] = context["ask_nom_mere"].strip()
+        # Civilité (accepte "1"/"2"/"3" OU libellés "M.", "Mme", "Mlle")
+        civ = _ctx_first(["ask_civilite", "civilite", "civility"])
+        if civ:
+            extra_data["civilite"] = _CIVILITE_MAP.get(civ, civ)
+
+        date_n = _ctx_first([
+            "ask_date_naissance", "date_de_naissance", "date_naissance",
+            "birthday", "naissance_date",
+        ])
+        if date_n:
+            extra_data["date_naissance"] = date_n
+
+        lieu_n = _ctx_first([
+            "ask_lieu_naissance", "lieu_de_naissance", "lieu_naissance",
+            "ville_naissance", "birth_place",
+        ])
+        if lieu_n:
+            extra_data["lieu_naissance"] = lieu_n
+
+        type_p = _ctx_first([
+            "ask_type_piece", "type_de_piece_identite", "type_piece", "type_piece_identite",
+        ])
+        if type_p:
+            extra_data["type_piece"] = _PIECE_MAP.get(type_p, type_p.lower())
+
+        num_p = _ctx_first([
+            "ask_numero_piece", "numero_de_la_piece", "numero_piece", "numero_piece_identite",
+            "cni_number", "piece_number",
+        ])
+        if num_p:
+            extra_data["numero_piece"] = num_p
+
+        dir_s = _ctx_first([
+            "ask_direction_service", "direction_service", "direction", "service",
+        ])
+        if dir_s:
+            extra_data["direction_service"] = dir_s
+
+        bp = _ctx_first(["ask_boite_postale", "boite_postale", "bp"])
+        if bp:
+            extra_data["boite_postale_choisie"] = bp
+
+        # Domicile (adresse physique)
+        dom = _ctx_first([
+            "ask_domicile", "domicile", "adresse_domicile", "adresse_de_domicile",
+            "adresse", "lieu_residence",
+        ])
+        if dom:
+            extra_data["domicile"] = dom
+
+        # Exploitation / site
+        expl = _ctx_first([
+            "ask_exploitation", "exploitation_site", "exploitation", "site",
+            "site_exploitation",
+        ])
+        if expl:
+            extra_data["exploitation_site"] = expl
+
+        # Date d'embauche
+        date_emb = _ctx_first([
+            "ask_date_embauche", "date_d_embauche", "date_embauche",
+            "date_entree", "date_recrutement",
+        ])
+        if date_emb:
+            extra_data["date_embauche"] = date_emb
+
+        conj = _ctx_first([
+            "ask_nom_conjoint", "nom_et_prenoms_du_conjoint", "nom_conjoint", "conjoint",
+        ])
+        if conj:
+            extra_data["nom_conjoint"] = conj
+
+        pers_prev = _ctx_first([
+            "ask_nom_personne_prev", "personne_a_prevenir_en_cas_d_urgence",
+            "personne_a_prevenir", "contact_urgence_nom",
+        ])
+        if pers_prev:
+            extra_data["personne_a_prevenir"] = pers_prev
+
+        c1 = _ctx_first(["ask_contact1_prev", "contact_urgence", "tel_urgence"])
+        if c1:
+            extra_data["contact_prevenir_1"] = c1
+        c2 = _ctx_first(["ask_contact2_prev", "contact_urgence_2"])
+        if c2:
+            extra_data["contact_prevenir_2"] = c2
+
+        ayant = _ctx_first([
+            "ask_ayant_droit", "ayant_droit_declare", "ayants_droit", "ayant_droit",
+        ])
+        if ayant:
+            extra_data["ayants_droit"] = ayant
+
+        cat = _ctx_first([
+            "ask_categorie", "categorie_professionnelle", "categorie",
+        ])
+        if cat:
+            extra_data["categorie"] = _CATEGORIE_MAP.get(cat, cat)
+
+        nom_m = _ctx_first([
+            "ask_nom_mere", "nom_de_jeune_fille_de_la_mere", "nom_mere", "nom_jeune_fille_mere",
+        ])
+        if nom_m:
+            extra_data["nom_mere"] = nom_m
 
         # Persiste : fonction (= profession), situation matri, extra JSON
-        fonction = context.get("ask_profession") or context.get("ask_fonction") or context.get("fonction")
+        fonction = _ctx_first([
+            "ask_profession", "ask_fonction", "fonction", "profession", "metier",
+        ])
+        situation_raw = _ctx_first([
+            "ask_situation_matri", "situation_matrimoniale", "situation",
+        ])
         situation = None
-        if context.get("ask_situation_matri"):
-            situation = _SITUATION_MAP.get(
-                context["ask_situation_matri"].strip(),
-                context["ask_situation_matri"].strip(),
-            )
+        if situation_raw:
+            situation = _SITUATION_MAP.get(situation_raw, _norm_situation(situation_raw))
+
+        # Résolution robuste des URLs de médias : on accepte les anciennes
+        # clés (`recto_media_url`, …) ET on scanne le contexte pour trouver
+        # toute clé `<step>_media_url` dont le code contient recto/verso/
+        # signature. Permet de fonctionner avec n'importe quel parcours LLM
+        # qui nomme ses steps `piece_identite_recto`, `photo_recto`, etc.
+        def _find_media(hints: list[str]) -> Optional[str]:
+            for h in hints:
+                v = context.get(f"{h}_media_url") or context.get(h)
+                if isinstance(v, str) and v.startswith(("http://", "https://", "/", "s3://")):
+                    return v
+            for key, val in context.items():
+                if not isinstance(key, str) or not key.endswith("_media_url"):
+                    continue
+                low = key.lower()
+                if any(h in low for h in hints) and isinstance(val, str) and val:
+                    return val
+            return None
+
+        recto_url = _find_media(["recto"])
+        verso_url = _find_media(["verso"])
+        signature_url = _find_media(["signature"])
+
+        # Signature : stockée dans extra_data pour affichage dans la fiche
+        if signature_url:
+            extra_data["signature_url"] = signature_url
 
         await dossier_service.upsert_donnees_pro(
             db, tenant.id, dossier,
@@ -775,9 +942,6 @@ async def create_real_dossier(
         )
 
         # ── Attache les pièces d'identité (recto + verso) au dossier ──
-        # Les URLs ont été sauvegardées par ocr_extract_recto/verso dans le contexte.
-        # On crée les PieceIdentite avec les données OCR pour que l'agent les voie
-        # depuis le back-office (visualisation photo + champs extraits).
         from app.models import PieceFace, PieceIdentite, PieceType
         piece_type_str = extra_data.get("type_piece", "cni")
         try:
@@ -785,15 +949,14 @@ async def create_real_dossier(
             if piece_type_str == "passeport":
                 ptype = PieceType.passeport
             elif piece_type_str == "attestation":
-                ptype = PieceType.carte_resident  # le plus proche dans l'enum existante
+                ptype = PieceType.carte_resident
         except Exception:
             ptype = PieceType.cni_uemoa
 
-        for face_name, media_key, ocr_key in [
-            ("recto", "recto_media_url", "ocr_recto"),
-            ("verso", "verso_media_url", "ocr_verso"),
+        for face_name, media_url, ocr_key in [
+            ("recto", recto_url, "ocr_recto"),
+            ("verso", verso_url, "ocr_verso"),
         ]:
-            media_url = context.get(media_key)
             if not media_url:
                 continue
             ocr_data = context.get(ocr_key) or {}
@@ -813,6 +976,12 @@ async def create_real_dossier(
             )
             db.add(piece)
             logger.info("Pièce attachée : %s (%s) — %s", face_name, ptype.value, media_url)
+
+        if signature_url:
+            logger.info(
+                "Signature attachée au dossier %s : %s",
+                dossier.dossier_number, signature_url,
+            )
 
         # F-06 — Si un écart saisie ↔ OCR a été détecté par
         # verify_user_data_vs_ocr, on force la revue humaine avant validation
@@ -909,14 +1078,21 @@ async def create_real_dossier(
             logger.warning("Enregistrement consentement certification échoué : %s", e)
 
         await db.flush()
+        msg = (
+            f"✅ Mise à jour du dossier *{dossier.dossier_number}* enregistrée."
+            if update_mode
+            else f"✅ Dossier *{dossier.dossier_number}* enregistré."
+        )
         return ActionResult(
             extra_context={
                 "numero_societaire": numero or "",  # vide jusqu'à validation agent
                 "dossier_id": str(dossier.id),
                 "dossier_number": dossier.dossier_number,
                 "dossier_created": True,
+                # Libère le flag update pour le prochain parcours
+                "_update_mode": False,
             },
-            message=f"✅ Dossier *{dossier.dossier_number}* enregistré.",
+            message=msg,
         )
     except Exception as e:
         logger.exception("create_real_dossier a échoué : %s", e)

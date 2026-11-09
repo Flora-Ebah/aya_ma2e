@@ -1,0 +1,18 @@
+/*
+ * POC Design System — point d'entrée.
+ * Importe l'ensemble du design GS2E/POC (classes .sa-*) sur MA2E.
+ * Les polices sont chargées via next/font (voir app/layout.tsx), on
+ * ne réimporte pas fonts.css local (woff2 absents).
+ */
+
+/* 1. Base layout + reset POC */
+@import "./plateforme.css";
+
+/* 2. Composants SARA (sidebar, nav, cards, boutons, tableaux, forms, etc.) */
+@import "./sara.css";
+
+/* 3. Overrides spécifiques app */
+@import "./app.css";
+
+/* 4. Compléments du kit de composants React (components/ui) */
+@import "./kit.css";

@@ -2,10 +2,9 @@
 # SECRETS — ne JAMAIS pousser
 # =========================================================
 .env
-.env.local
-.env.*.local
+.env.*
 **/.env
-**/.env.local
+**/.env.*
 !.env.example
 !**/.env.example
 !.env.local.example

@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: vai_dev_password
       POSTGRES_DB: virtual_ai
     ports:
-      - "55432:5432"
+      - "55436:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -44,6 +44,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: vai_mailhog
+    ports:
+      - "51025:1025"   # SMTP (backend → 51025)
+      - "58025:8025"   # Web UI : http://localhost:58025
 
 volumes:
   postgres_data:

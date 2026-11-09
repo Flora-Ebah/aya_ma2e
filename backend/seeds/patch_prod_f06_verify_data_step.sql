@@ -30,7 +30,7 @@ BEGIN
             INSERT INTO workflow_steps (
                 id, workflow_id, code, label, type, template_code,
                 action_name, next_step_code, branches, position,
-                validation_rules, prompt_variables
+                validation_rules, prompt_variables, meta
             ) VALUES (
                 gen_random_uuid(),
                 v_wf_id,
@@ -46,8 +46,9 @@ BEGIN
                     'mismatch',      'manual_review'
                 ),
                 105,                   -- entre ocr_extract (100) et confirm_ocr (110)
-                '{}'::jsonb,
-                '{}'::jsonb
+                '{}'::jsonb,           -- validation_rules
+                '{}'::jsonb,           -- prompt_variables
+                '{}'::jsonb            -- meta (NOT NULL, JSONB, défaut {})
             );
             RAISE NOTICE 'Step verify_data_vs_ocr inséré pour workflow %', v_wf_id;
         ELSE

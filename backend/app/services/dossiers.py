@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -22,14 +22,22 @@ from app.services import audit_service
 
 
 async def next_dossier_number(db: AsyncSession, tenant: Tenant) -> str:
+    """Génère le prochain numéro MA2E-YYYY-NNNNNN.
+
+    Utilise MAX(suffixe) + 1 et pas COUNT(*) + 1 : si un dossier est supprimé
+    ou si une transaction précédente a avancé le compteur sans commit, COUNT
+    fait collision sur le MA2E-YYYY-NNN déjà pris. MAX reste monotone.
+    """
     year = datetime.now(timezone.utc).year
     prefix = f"MA2E-{year}-"
-    stmt = select(func.count(Dossier.id)).where(
+    # Extrait la partie numérique après le préfixe et prend le max.
+    suffix_expr = func.substring(Dossier.dossier_number, len(prefix) + 1)
+    stmt = select(func.max(func.cast(suffix_expr, Integer))).where(
         Dossier.tenant_id == tenant.id,
         Dossier.dossier_number.like(f"{prefix}%"),
     )
-    count = (await db.execute(stmt)).scalar_one()
-    return f"{prefix}{(count + 1):06d}"
+    max_suffix = (await db.execute(stmt)).scalar() or 0
+    return f"{prefix}{(max_suffix + 1):06d}"
 
 
 async def get_or_create_dossier(
@@ -139,14 +147,31 @@ async def upsert_donnees_pro(
     dossier: Dossier,
     **fields,
 ) -> DonneesPro:
+    """Crée ou met à jour la DonneesPro du dossier. Comportement :
+    - les champs scalaires (fonction, situation_familiale…) sont écrasés
+    - le champ `extra` (JSONB) est **fusionné** avec l'existant (les nouvelles
+      clés remplacent les anciennes mais les clés non touchées sont conservées).
+    Permet d'enrichir progressivement le dossier au fil du parcours.
+    """
     stmt = select(DonneesPro).where(DonneesPro.dossier_id == dossier.id)
     dp = (await db.execute(stmt)).scalar_one_or_none()
+
+    # Ne pas écraser avec une valeur None — laisse la valeur en place
+    clean_fields = {k: v for k, v in fields.items() if v is not None}
+
     if dp is None:
-        dp = DonneesPro(tenant_id=tenant_id, dossier_id=dossier.id, **fields)
+        # Création initiale — utilise extra=... tel quel
+        dp = DonneesPro(tenant_id=tenant_id, dossier_id=dossier.id, **clean_fields)
         db.add(dp)
     else:
-        for k, v in fields.items():
-            setattr(dp, k, v)
+        for k, v in clean_fields.items():
+            if k == "extra" and isinstance(v, dict):
+                # Merge avec l'existant pour préserver les anciennes clés
+                merged = dict(dp.extra or {})
+                merged.update(v)
+                dp.extra = merged
+            else:
+                setattr(dp, k, v)
     await db.flush()
     return dp
 

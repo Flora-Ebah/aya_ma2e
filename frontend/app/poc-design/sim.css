@@ -1,0 +1,17 @@
+/* Reçu imprimable et impression. */
+/* ---- Reçu imprimable */
+.recu-body { background: rgb(var(--color-bg-canvas)); margin: 0; }
+.recu { max-width: 860px; margin: 24px auto; padding: 24px; background: rgb(var(--color-bg-surface)); border: 1px solid rgb(var(--color-border-default)); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 16px; }
+.recu__actions { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.recu__head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; flex-wrap: wrap; border-bottom: 2px solid rgb(var(--color-action-primary)); padding-bottom: 12px; }
+.recu__marque { font: 700 24px/32px var(--font-heading); } .recu__numero { display: flex; flex-direction: column; align-items: flex-end; } .recu__num { font-size: 20px; }
+.recu__grille { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px 24px; } .recu__grille dt { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: rgb(var(--color-text-secondary)); } .recu__grille dd { margin: 2px 0 0; }
+.recu__pied { color: rgb(var(--color-text-secondary)); }
+@media (max-width: 767px) { .recu { margin: 0; border: 0; padding: 16px; } }
+
+@media print {
+  html, html[data-theme] { color-scheme: light; --color-bg-canvas: 255 255 255; --color-bg-surface: 255 255 255; --color-bg-surface-subtle: 248 250 252; --color-text-primary: 15 23 42; --color-text-secondary: 71 85 105; --color-border-default: 203 213 225; }
+  .sa-sidebar, .sa-header, .sa-bottom-nav, .sa-banner, .sa-netline, .sa-toast-region, .sa-scrim, .no-print, .sa-page-actions, .filtres-barre, .filtres-form, .sa-toolbar, .sa-skip-link, .chart-data summary { display: none !important; }
+  .sa-main { padding: 0; max-width: none; } .sa-app, .sa-app__body { display: block; } .sa-card { break-inside: avoid; box-shadow: none; }
+  .chart-data { display: none; } body { background: #fff; } .recu { border: 0; margin: 0; padding: 0; }
+}

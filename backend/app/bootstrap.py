@@ -51,13 +51,36 @@ CREATE TRIGGER ma2e_audit_no_truncate
 """
 
 
+def _split_sql(sql: str) -> list[str]:
+    """Découpe un bloc SQL en statements individuels — asyncpg refuse les
+    multi-commandes dans un prepared statement. On respecte les corps
+    PL/pgSQL encadrés par $$...$$."""
+    out: list[str] = []
+    buf: list[str] = []
+    in_dollar = False
+    for line in sql.splitlines():
+        if "$$" in line:
+            in_dollar = not in_dollar if line.count("$$") % 2 else in_dollar
+        buf.append(line)
+        if not in_dollar and line.rstrip().endswith(";"):
+            stmt = "\n".join(buf).strip()
+            if stmt:
+                out.append(stmt)
+            buf = []
+    tail = "\n".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
 async def bootstrap_db() -> None:
     engine = create_async_engine(settings.database_url, echo=False)
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
         # F-12 — pose le trigger append-only sur audit_logs
-        await conn.execute(text(AUDIT_APPEND_ONLY_SQL))
+        for stmt in _split_sql(AUDIT_APPEND_ONLY_SQL):
+            await conn.execute(text(stmt))
         log.info("✅ audit_logs append-only trigger installé (F-12)")
     await engine.dispose()
     log.info("✅ Database bootstrap complete.")

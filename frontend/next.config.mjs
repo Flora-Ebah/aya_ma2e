@@ -9,7 +9,9 @@ const CSP_DIRECTIVES = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https:",
+  // En dev on autorise aussi http: pour afficher les URLs présignées MinIO local
+  // (http://localhost:59100/...). En prod → HTTPS uniquement.
+  IS_DEV ? "img-src 'self' data: blob: http: https:" : "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
   // Prod : HTTPS uniquement ; dev : autorise http:// pour appeler le backend local.
   IS_DEV ? "connect-src 'self' http: https: ws: wss:" : "connect-src 'self' https: wss:",

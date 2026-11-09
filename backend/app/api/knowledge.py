@@ -1,14 +1,16 @@
-"""API base de connaissances : gestion des sources, scraping live via SSE."""
+"""API base de connaissances : gestion des sources, upload de fichiers,
+scraping URL en direct (SSE)."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime
 from typing import AsyncGenerator, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
@@ -19,8 +21,14 @@ from app.core.database import get_db
 from app.core.tenancy import AuthContext, get_auth_context, tenant_filter
 from app.models import KnowledgeChunk, KnowledgeSource
 from app.services.embeddings import embed_many
+from app.services.file_text_extractor import (
+    SUPPORTED_EXTENSIONS,
+    ExtractionError,
+    extract_text,
+)
 from app.services.knowledge_ingest import chunk_text
-from app.services.scraper import crawl_site
+from app.services.scraper import crawl_site, crawl_site_iter
+from app.services.scraper_spa import crawl_site_spa_iter
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +102,145 @@ async def stats(
     return {"sources": nb_sources, "chunks": nb_chunks}
 
 
+class UploadOut(BaseModel):
+    source_id: UUID
+    title: str
+    chunks_count: int
+    chars: int
+
+
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 Mo
+
+
+@router.post("/upload", response_model=UploadOut)
+async def upload_file(
+    file: UploadFile = File(...),
+    tenant_id: Optional[UUID] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Upload d'un document (PDF, DOCX, XLSX, TXT, MD, CSV) : extraction du
+    texte, chunking, embedding, insertion dans ``knowledge_chunks``.
+
+    Déduplication par hash du contenu : un fichier identique déjà ingéré renvoie
+    la source existante sans recalculer les embeddings."""
+    target = tenant_filter(ctx, tenant_id)
+    if not file.filename:
+        raise HTTPException(400, "Nom de fichier manquant.")
+
+    data = await file.read()
+    if len(data) == 0:
+        raise HTTPException(400, "Fichier vide.")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            400,
+            f"Fichier trop volumineux (max {MAX_UPLOAD_BYTES // (1024 * 1024)} Mo).",
+        )
+
+    try:
+        text = extract_text(file.filename, data)
+    except ExtractionError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    if not text.strip():
+        raise HTTPException(400, "Aucun texte extractible du fichier.")
+
+    content_hash = hashlib.sha256(data).hexdigest()
+    pseudo_url = f"file://{file.filename}"
+
+    # Déduplication : même tenant + même hash → on retourne la source existante.
+    existing = (
+        await db.execute(
+            select(KnowledgeSource).where(
+                KnowledgeSource.tenant_id == target,
+                KnowledgeSource.content_hash == content_hash,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return UploadOut(
+            source_id=existing.id,
+            title=existing.title or file.filename,
+            chunks_count=existing.chunks_count,
+            chars=len(text),
+        )
+
+    # Même nom mais contenu différent → on remplace les chunks de l'ancienne.
+    old = (
+        await db.execute(
+            select(KnowledgeSource).where(
+                KnowledgeSource.tenant_id == target,
+                KnowledgeSource.source_url == pseudo_url,
+            )
+        )
+    ).scalar_one_or_none()
+    if old:
+        await db.execute(
+            delete(KnowledgeChunk).where(KnowledgeChunk.source_id == old.id)
+        )
+        src = old
+        src.content_hash = content_hash
+        src.title = file.filename[:512]
+        src.status = "ingesting"
+        src.last_crawled_at = datetime.utcnow()
+    else:
+        src = KnowledgeSource(
+            tenant_id=target,
+            type="file",
+            source_url=pseudo_url,
+            title=file.filename[:512],
+            content_hash=content_hash,
+            status="ingesting",
+            last_crawled_at=datetime.utcnow(),
+        )
+        db.add(src)
+    await db.flush()
+
+    chunks = chunk_text(text)
+    if not chunks:
+        src.status = "empty"
+        src.chunks_count = 0
+        await db.commit()
+        return UploadOut(source_id=src.id, title=src.title or file.filename, chunks_count=0, chars=len(text))
+
+    vectors = await embed_many(chunks)
+    for idx, (content, vec) in enumerate(zip(chunks, vectors)):
+        db.add(
+            KnowledgeChunk(
+                tenant_id=target,
+                source_id=src.id,
+                source=pseudo_url,
+                chunk_index=idx,
+                content=content,
+                token_count=max(1, len(content) // 4),
+                embedding=vec,
+                extra={"title": file.filename, "upload": True},
+            )
+        )
+    src.chunks_count = len(chunks)
+    src.status = "ready"
+    await db.commit()
+    log.info(
+        "Knowledge upload : %s (%d chars → %d chunks) tenant=%s",
+        file.filename,
+        len(text),
+        len(chunks),
+        target,
+    )
+    return UploadOut(
+        source_id=src.id,
+        title=file.filename,
+        chunks_count=len(chunks),
+        chars=len(text),
+    )
+
+
+@router.get("/supported-extensions")
+async def supported_extensions():
+    """Liste les extensions acceptées par /upload — utile pour le filter côté UI."""
+    return {"extensions": sorted(SUPPORTED_EXTENSIONS)}
+
+
 @router.delete("/sources/{source_id}")
 async def delete_source(
     source_id: UUID,
@@ -117,29 +264,13 @@ async def stream_ingest(
     url: str = Query(...),
     max_pages: int = Query(30, ge=1, le=100),
     tenant_id: Optional[UUID] = Query(None),
-    token: Optional[str] = Query(None),  # auth en query string pour EventSource
+    ctx: AuthContext = Depends(get_auth_context),
 ):
     """Streame en SSE les événements du scraping + ingestion en direct.
 
-    EventSource ne permet pas d'envoyer le header Authorization, donc le token
-    JWT passe en query string.
+    L'authentification se fait via le cookie httpOnly `ma2e_token`
+    (envoyé par EventSource avec `withCredentials: true`).
     """
-    # Authentification manuelle via le token query
-    from app.core.security import decode_token
-    from app.models.user import UserRole
-
-    if not token:
-        raise HTTPException(401, "missing token")
-    try:
-        payload = decode_token(token)
-        ctx = AuthContext(
-            user_id=UUID(payload["sub"]),
-            tenant_id=UUID(payload["tenant_id"]) if payload.get("tenant_id") else None,
-            role=UserRole(payload["role"]),
-        )
-    except Exception:
-        raise HTTPException(401, "invalid token")
-
     target_tenant = tenant_filter(ctx, tenant_id)
 
     async def event_stream() -> AsyncGenerator[bytes, None]:
@@ -154,9 +285,38 @@ async def stream_ingest(
         try:
             yield evt("start", url=url, max_pages=max_pages, tenant_id=str(target_tenant))
 
-            # 1. Scraping
-            yield evt("scrape_start", message=f"Crawl de {url}…")
-            pages = await crawl_site(url, max_pages=max_pages)
+            # 1+2. Scraping streaming + ingestion au fil de l'eau (évite les
+            # longues plages silencieuses qui font tomber EventSource/ngrok).
+            # On tente Playwright (rend le JS → SPA React/Vue) ; si Playwright
+            # ne ramène rien (indisponible, timeout, etc.), on retombe sur
+            # httpx (rapide pour les sites statiques / SSR).
+            yield evt("scrape_start", message=f"Crawl de {url} (rendu JS)…")
+            pages: list = []
+            try:
+                async for page in crawl_site_spa_iter(url, max_pages=max_pages):
+                    pages.append(page)
+                    yield evt(
+                        "scrape_page",
+                        index=len(pages),
+                        url=page.url,
+                        title=page.title,
+                        chars=len(page.text),
+                    )
+            except Exception as e:
+                log.warning("playwright crawl failed, fallback httpx: %s", e)
+
+            if not pages:
+                yield evt("scrape_start", message=f"Fallback httpx sur {url}…")
+                async for page in crawl_site_iter(url, max_pages=max_pages):
+                    pages.append(page)
+                    yield evt(
+                        "scrape_page",
+                        index=len(pages),
+                        url=page.url,
+                        title=page.title,
+                        chars=len(page.text),
+                    )
+
             yield evt(
                 "scrape_done",
                 count=len(pages),
@@ -167,7 +327,7 @@ async def stream_ingest(
                 yield evt("done", message="Aucune page récupérée", inserted=0)
                 return
 
-            # 2. Ingestion page par page
+            # 3. Ingestion page par page
             inserted = 0
             chunks_total = 0
             async with Session() as db:

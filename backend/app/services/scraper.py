@@ -10,6 +10,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import AsyncIterator
 from urllib.parse import urldefrag, urljoin, urlparse
 
 import httpx
@@ -19,7 +20,7 @@ log = logging.getLogger(__name__)
 
 USER_AGENT = (
     "Mozilla/5.0 (compatible; MA2EKnowledgeBot/1.0; "
-    "+https://ma2e.ci) AYA assistant ingestion"
+    "+https://ma2e.ci) MA2E knowledge ingestion"
 )
 HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 
@@ -52,6 +53,38 @@ def _extract(html: str, base_url: str) -> tuple[str, str, list[str]]:
     """Retourne (title, plain_text, internal_links)."""
     soup = BeautifulSoup(html, "lxml")
 
+    # Récupère les métadonnées AVANT de retirer les blocs bruyants : utile
+    # pour les SPA (React/Vue) où <body> est vide à la 1re requête HTTP.
+    meta_bits: list[str] = []
+    for sel, attr in [
+        ("meta[name='description']", "content"),
+        ("meta[property='og:title']", "content"),
+        ("meta[property='og:description']", "content"),
+        ("meta[property='og:site_name']", "content"),
+        ("meta[name='twitter:title']", "content"),
+        ("meta[name='twitter:description']", "content"),
+    ]:
+        for el in soup.select(sel):
+            val = (el.get(attr) or "").strip()
+            if val:
+                meta_bits.append(val)
+
+    # JSON-LD : extraire name/description/keywords quand présents
+    import json as _json
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        try:
+            payload = _json.loads(script.string or "")
+        except Exception:
+            continue
+        candidates = payload if isinstance(payload, list) else [payload]
+        for entry in candidates:
+            if not isinstance(entry, dict):
+                continue
+            for key in ("name", "alternateName", "description", "about", "slogan"):
+                val = entry.get(key)
+                if isinstance(val, str) and val.strip():
+                    meta_bits.append(val.strip())
+
     for sel in NOISE_SELECTORS:
         for el in soup.select(sel):
             el.decompose()
@@ -69,8 +102,15 @@ def _extract(html: str, base_url: str) -> tuple[str, str, list[str]]:
     for p in soup.find_all(["p", "li"]):
         p.insert_after("\n")
 
-    text = soup.get_text()
-    text = _clean_text(text)
+    body_text = _clean_text(soup.get_text())
+
+    # Si body quasi vide (SPA), on bascule sur les métadonnées comme contenu
+    if len(body_text) < 80 and meta_bits:
+        text = _clean_text("\n".join(meta_bits))
+    elif meta_bits:
+        text = _clean_text(body_text + "\n\n" + "\n".join(meta_bits))
+    else:
+        text = body_text
 
     # Liens internes
     links: list[str] = []
@@ -93,8 +133,63 @@ def _is_skippable_url(url: str) -> bool:
     BAD_EXT = (
         ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".ico",
         ".css", ".js", ".pdf", ".zip", ".mp4", ".mp3", ".woff", ".woff2",
+        ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".csv",
     )
     return any(lower.endswith(ext) for ext in BAD_EXT)
+
+
+async def crawl_site_iter(
+    start_url: str,
+    *,
+    max_pages: int = 50,
+    same_host_only: bool = True,
+) -> AsyncIterator[ScrapedPage]:
+    """Version streaming de crawl_site : yield chaque page dès qu'elle est prête."""
+    start_host = urlparse(start_url).netloc
+    queue: list[str] = [start_url]
+    seen: set[str] = set()
+    yielded = 0
+
+    async with httpx.AsyncClient(
+        timeout=HTTP_TIMEOUT,
+        follow_redirects=True,
+        headers={"User-Agent": USER_AGENT, "Accept-Language": "fr-FR,fr;q=0.9"},
+    ) as client:
+        while queue and yielded < max_pages:
+            url = queue.pop(0)
+            url, _ = urldefrag(url)
+            if url in seen or _is_skippable_url(url):
+                continue
+            seen.add(url)
+            if same_host_only and not urlparse(url).netloc.endswith(start_host):
+                continue
+            try:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    log.warning("skip %s -> %s", url, resp.status_code)
+                    continue
+                content_type = resp.headers.get("content-type", "")
+                if "html" not in content_type.lower():
+                    continue
+                title, text, links = _extract(resp.text, url)
+                if len(text) < 40:
+                    continue
+                page = ScrapedPage(
+                    url=url,
+                    title=title or url,
+                    text=text,
+                    content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    links=list(dict.fromkeys(links)),
+                )
+                yielded += 1
+                log.info("[scrape %d/%d] %s (%d chars)", yielded, max_pages, url, len(text))
+                yield page
+                for link in page.links:
+                    if link not in seen:
+                        queue.append(link)
+            except Exception as e:
+                log.warning("scrape failed %s: %s", url, e)
+            await asyncio.sleep(0.2)
 
 
 async def crawl_site(

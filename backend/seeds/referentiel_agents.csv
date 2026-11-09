@@ -1,0 +1,9 @@
+matricule;employeur;nom;fonction;status
+CIE-00001;CIE;KOUASSI Awa;Technicienne réseau;active
+CIE-00042;CIE;DIABATE Mahamadou;Chef de service distribution;active
+CIE-00873;CIE;TRAORE Aminata;Comptable;active
+SODECI-01234;SODECI;OUATTARA Drissa;Ingénieur eau potable;active
+SODECI-09812;SODECI;COULIBALY Salimata;Responsable clientèle;active
+ERANOVE-00500;ERANOVE;DOUMBIA Mariam;Directrice RH groupe;active
+ERANOVE-00501;ERANOVE;KONATE Yacouba;Responsable IT;active
+CIE-99999;CIE;DUPONT Ancien;Retraité;inactive

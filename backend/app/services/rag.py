@@ -15,7 +15,7 @@ from uuid import UUID
 from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.conversation.llm import chat_complete
+from app.conversation.llm import chat_complete, tenant_chat_complete
 from app.models import KnowledgeChunk, Message, MessageDirection
 from app.services.embeddings import embed_one
 
@@ -82,7 +82,7 @@ async def rewrite_query(message: str, history: list[dict]) -> str:
     # Construit un mini-transcript pour le LLM
     snippets = []
     for m in history[-6:]:  # 6 derniers tours suffisent
-        prefix = "User" if m["role"] == "user" else "AYA"
+        prefix = "User" if m["role"] == "user" else "Assistant"
         snippets.append(f"{prefix}: {m['content'][:200]}")
     transcript = "\n".join(snippets)
 
@@ -195,13 +195,12 @@ async def answer_question(
 
     if best_sim < MIN_SIMILARITY:
         # Cas où on a rien de pertinent → demander une clarification CONTEXTUELLE MA2E
-        clarif_system = (
-            f"Tu es AYA, assistante virtuelle de {tenant_name} (Mutuelle des Agents de l'Eau "
-            "et de l'Électricité, Côte d'Ivoire). MA2E est une mutuelle d'épargne et de crédit qui "
+        clarif_task = (
+            "MA2E est une mutuelle d'épargne et de crédit qui "
             "propose à ses sociétaires : crédits (ordinaire, express, immobilier, immobilier différé), "
             "produits d'épargne (express, ordinaire, logement, dépôts), projets immobiliers, "
             "et le statut de sociétaire lui-même.\n\n"
-            f"L'utilisateur t'a posé une question mais tu n'as pas trouvé d'information précise.\n\n"
+            "L'utilisateur t'a posé une question mais tu n'as pas trouvé d'information précise.\n\n"
             "Historique récent :\n"
             + ("\n".join(f"- {h['role']}: {h['content'][:200]}" for h in history[-4:]) if history else "(début de conversation)")
             + f"\n\nDernier message utilisateur : « {question} »\n\n"
@@ -211,7 +210,9 @@ async def answer_question(
             "Devenir sociétaire MA2E, ouvrir un produit d'épargne, ou souscrire à un crédit ?». "
             "Reste en français, 1-2 phrases max, ne propose JAMAIS d'options hors MA2E."
         )
-        clarif = await chat_complete(system_prompt=clarif_system, user_message=question)
+        clarif = await tenant_chat_complete(
+            db, tenant_id, task_prompt=clarif_task, user_message=question,
+        )
         return RagAnswer(
             answer=(clarif or "").strip()
             or "Pouvez-vous préciser votre demande ? Souhaitez-vous des informations sur un crédit, une épargne, ou devenir sociétaire ?",
@@ -225,28 +226,25 @@ async def answer_question(
         context_blocks.append(f"[Source {i} — {c.title}]\n{c.content.strip()}")
     context = "\n\n---\n\n".join(context_blocks)
 
-    # 4. Système prompt orienté contexte conversationnel
-    system = (
-        f"Tu es AYA, assistante virtuelle officielle de {tenant_name} "
-        f"(Mutuelle des Agents de l'Eau et de l'Électricité, Côte d'Ivoire).\n\n"
-        f"Tu poursuis une conversation. L'historique des messages t'est fourni — tiens-en compte "
-        f"pour comprendre le contexte (le sociétaire peut faire référence à un sujet précédent).\n\n"
-        f"Règles :\n"
-        f"- Réponds en français, chaleureuse, concise, professionnelle\n"
-        f"- Utilise UNIQUEMENT les informations des SOURCES ci-dessous\n"
-        f"- Si la question est ambiguë (ex: «conditions pour intégrer» sans préciser quoi), "
-        f"DEMANDE une clarification au lieu de deviner\n"
-        f"- Si la question est un follow-up («oui», «plus de détails»), reprends le SUJET PRÉCÉDENT "
-        f"de la conversation et donne plus d'informations sur ce sujet\n"
-        f"- Maximum 6 phrases ou une liste courte\n"
-        f"- Termine par une question ouverte si pertinent\n"
-        f"- Si la personne veut s'identifier / mettre à jour / vérifier son statut → "
-        f"oriente vers le menu (tapez *menu*)\n\n"
-        f"SOURCES MA2E :\n\n{context}"
+    # 4. Tâche RAG (la persona est ajoutée par tenant_chat_complete via le registry)
+    task = (
+        "Tu poursuis une conversation. L'historique des messages t'est fourni — tiens-en compte "
+        "pour comprendre le contexte (le sociétaire peut faire référence à un sujet précédent).\n\n"
+        "Règles :\n"
+        "- Utilise UNIQUEMENT les informations des SOURCES ci-dessous\n"
+        "- Si la question est ambiguë (ex: «conditions pour intégrer» sans préciser quoi), "
+        "DEMANDE une clarification au lieu de deviner\n"
+        "- Si la question est un follow-up («oui», «plus de détails»), reprends le SUJET PRÉCÉDENT "
+        "de la conversation et donne plus d'informations sur ce sujet\n"
+        "- Maximum 6 phrases ou une liste courte\n"
+        "- Termine par une question ouverte si pertinent\n"
+        "- Si la personne veut s'identifier / mettre à jour / vérifier son statut → "
+        "oriente vers le menu (tapez *menu*)\n\n"
+        f"SOURCES {tenant_name} :\n\n{context}"
     )
 
-    answer = await chat_complete(
-        system_prompt=system, user_message=question, history=history
+    answer = await tenant_chat_complete(
+        db, tenant_id, task_prompt=task, user_message=question, history=history,
     )
     return RagAnswer(
         answer=(answer or "").strip(),

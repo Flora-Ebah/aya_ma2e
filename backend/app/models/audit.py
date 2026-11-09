@@ -20,12 +20,24 @@ class AuditAction(str, enum.Enum):
     dossier_validated = "dossier_validated"
     dossier_rejected = "dossier_rejected"
     dossier_complement_requested = "dossier_complement_requested"
+    dossier_complement_auto_closed = "dossier_complement_auto_closed"
     piece_uploaded = "piece_uploaded"
     piece_ocr_completed = "piece_ocr_completed"
     piece_viewed = "piece_viewed"
     droits_request = "droits_request"
+    droits_anonymisation = "droits_anonymisation"
+    artci_contact_received = "artci_contact_received"
     data_export = "data_export"
     user_login = "user_login"
+    user_created = "user_created"
+    user_updated = "user_updated"
+    user_deactivated = "user_deactivated"
+    user_password_reset = "user_password_reset"
+    user_mfa_enabled = "user_mfa_enabled"
+    user_mfa_disabled = "user_mfa_disabled"
+    user_mfa_verified = "user_mfa_verified"
+    setting_changed = "setting_changed"
+    template_changed = "template_changed"
 
 
 class AuditLog(Base):
@@ -50,6 +62,11 @@ class AuditLog(Base):
 
     actor_type: Mapped[str] = mapped_column(String(32), nullable=False)
     actor_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    # Contexte d'origine (US-27 backlog : conserver l'IP et le user-agent
+    # pour faciliter les investigations)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     action: Mapped[AuditAction] = mapped_column(SAEnum(AuditAction, name="audit_action"), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(64), nullable=False)

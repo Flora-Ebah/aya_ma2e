@@ -450,6 +450,69 @@ async def export_dossiers_csv(
     )
 
 
+@router.get("/fiches.pdf")
+async def get_bulk_fiches_pdf(
+    ids: str = Query(..., description="IDs séparés par des virgules"),
+    db: AsyncSession = Depends(get_db),
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Génère un PDF unique concaténant les fiches sociétaires sélectionnées.
+    Déclarée AVANT /{dossier_id} pour éviter que FastAPI matche /{dossier_id}
+    avec 'fiches.pdf' en tentant un parse UUID."""
+    from fastapi.responses import Response as FastResponse
+    from app.core.storage import presigned_from_minio_url
+    from app.services.fiche_pdf import generate_fiche_pdf
+    from app.models import User
+    from pypdf import PdfReader, PdfWriter
+    import io
+
+    id_list = [UUID(s.strip()) for s in ids.split(",") if s.strip()]
+    if not id_list:
+        raise HTTPException(status_code=400, detail="no ids provided")
+    if len(id_list) > 100:
+        raise HTTPException(status_code=400, detail="too many ids (max 100)")
+
+    user = (await db.execute(select(User).where(User.id == ctx.user_id))).scalar_one_or_none()
+    imprime_par = (user.name or user.email) if user else "—"
+
+    writer = PdfWriter()
+    for did in id_list:
+        stmt = (
+            select(Dossier)
+            .options(
+                selectinload(Dossier.pieces),
+                selectinload(Dossier.donnees_pro),
+                selectinload(Dossier.consentements),
+            )
+            .where(Dossier.id == did)
+        )
+        d = (await db.execute(stmt)).scalar_one_or_none()
+        if d is None:
+            continue
+        if not ctx.is_super_admin and d.tenant_id != ctx.tenant_id:
+            continue
+        end_user = (
+            await db.execute(select(EndUser).where(EndUser.id == d.end_user_id))
+        ).scalar_one_or_none()
+        d.end_user = end_user
+        recto = next((p for p in d.pieces if p.face.value == "recto"), None)
+        photo_url = presigned_from_minio_url(recto.storage_key) if recto else None
+        sig_raw = (d.donnees_pro.extra or {}).get("signature_url") if d.donnees_pro else None
+        sig_url = presigned_from_minio_url(sig_raw) if sig_raw else None
+        pdf_bytes = generate_fiche_pdf(d, imprime_par=imprime_par, photo_url=photo_url, signature_url=sig_url)
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        for p in reader.pages:
+            writer.add_page(p)
+
+    out = io.BytesIO()
+    writer.write(out)
+    return FastResponse(
+        content=out.getvalue(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="fiches-ma2e.pdf"'},
+    )
+
+
 @router.get("/{dossier_id}", response_model=DossierDetail)
 async def get_dossier(
     dossier_id: UUID,
@@ -522,6 +585,18 @@ async def get_dossier(
             "created_at": p.created_at,
         })
 
+    # Présigne aussi l'URL de la signature manuscrite stockée dans extra.
+    donnees_pro_out = dossier.donnees_pro
+    if donnees_pro_out and donnees_pro_out.extra:
+        sig_raw = donnees_pro_out.extra.get("signature_url")
+        if sig_raw:
+            sig_presigned = presigned_from_minio_url(sig_raw)
+            if sig_presigned:
+                # Copie défensive pour ne pas muter l'ORM
+                new_extra = dict(donnees_pro_out.extra)
+                new_extra["signature_url"] = sig_presigned
+                donnees_pro_out.extra = new_extra
+
     return DossierDetail(
         id=dossier.id,
         tenant_id=dossier.tenant_id,
@@ -536,7 +611,7 @@ async def get_dossier(
         created_at=dossier.created_at,
         updated_at=dossier.updated_at,
         pieces=pieces,
-        donnees_pro=dossier.donnees_pro,
+        donnees_pro=donnees_pro_out,
         consentements=[
             {
                 "id": c.id,
@@ -554,6 +629,7 @@ async def get_dossier(
             "name": end_user.name,
             "phone": end_user.phone,
             "telegram_id": end_user.telegram_id,
+            "extra": end_user.extra or {},
         },
         audit_logs=[
             {
@@ -744,3 +820,102 @@ async def request_complement(
     await dossier_lock_service.release_on_decision(db, dossier)
     await db.commit()
     return {"ok": True, "status": dossier.status.value, "notification": notif}
+
+
+@router.get("/{dossier_id}/fiche.pdf")
+async def get_fiche_pdf(
+    dossier_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Fiche d'inscription sociétaire au format PDF — overlay sur le template
+    vierge MA2E. Les champs vides en base restent vides dans le PDF."""
+    from fastapi.responses import Response as FastResponse
+    from app.core.storage import presigned_from_minio_url
+    from app.services.fiche_pdf import generate_fiche_pdf
+    from app.models import User
+
+    stmt = (
+        select(Dossier)
+        .options(
+            selectinload(Dossier.pieces),
+            selectinload(Dossier.donnees_pro),
+            selectinload(Dossier.consentements),
+        )
+        .where(Dossier.id == dossier_id)
+    )
+    dossier = (await db.execute(stmt)).scalar_one_or_none()
+    if dossier is None:
+        raise HTTPException(status_code=404, detail="dossier not found")
+    if not ctx.is_super_admin and dossier.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    end_user = (
+        await db.execute(select(EndUser).where(EndUser.id == dossier.end_user_id))
+    ).scalar_one_or_none()
+    dossier.end_user = end_user  # attribut dynamique consommé par le service
+
+    user = (await db.execute(select(User).where(User.id == ctx.user_id))).scalar_one_or_none()
+    imprime_par = (user.name or user.email) if user else "—"
+
+    # Résolution photo (recto) + signature en URLs présignées
+    recto = next((p for p in dossier.pieces if p.face.value == "recto"), None)
+    photo_url = presigned_from_minio_url(recto.storage_key) if recto else None
+    signature_raw = (dossier.donnees_pro.extra or {}).get("signature_url") if dossier.donnees_pro else None
+    signature_url = presigned_from_minio_url(signature_raw) if signature_raw else None
+
+    pdf_bytes = generate_fiche_pdf(
+        dossier,
+        imprime_par=imprime_par,
+        photo_url=photo_url,
+        signature_url=signature_url,
+    )
+    filename = f"fiche-{dossier.dossier_number}.pdf"
+    return FastResponse(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@router.delete("/{dossier_id}", status_code=204)
+async def delete_dossier(
+    dossier_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    ctx: AuthContext = Depends(get_auth_context),
+):
+    """Suppression définitive d'un dossier (super_admin uniquement).
+
+    Usage réservé aux nettoyages de tests et aux demandes RGPD d'effacement
+    complet (ARTCI art. 21 — droit à l'oubli). Les pièces, données pro et
+    consentements sont supprimés en cascade (ondelete=CASCADE sur les FK).
+    Le journal d'audit est préservé pour la traçabilité.
+    """
+    from app.models import UserRole as _UR
+    if ctx.role not in (_UR.super_admin, _UR.tenant_admin):
+        raise HTTPException(status_code=403, detail="admin only")
+
+    dossier = (
+        await db.execute(select(Dossier).where(Dossier.id == dossier_id))
+    ).scalar_one_or_none()
+    if not dossier:
+        raise HTTPException(status_code=404, detail="dossier not found")
+    if not ctx.is_super_admin and dossier.tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    dossier_number = dossier.dossier_number
+
+    await db.delete(dossier)
+    await audit_service.log(
+        db,
+        tenant_id=ctx.tenant_id,
+        action=AuditAction.droits_anonymisation,
+        resource_type="dossier",
+        resource_id=str(dossier_id),
+        actor_type="user",
+        actor_id=str(ctx.user_id),
+        details={"dossier_number": dossier_number, "operation": "hard_delete"},
+    )
+    await db.commit()
+    from fastapi import Response
+    return Response(status_code=204)

@@ -25,6 +25,8 @@ from app.api import knowledge as knowledge_api
 from app.api import me as me_api
 from app.api import message_templates as templates_api
 from app.api import otp as otp_api
+from app.api import parcours as parcours_api
+from app.api import reference_lists as reference_lists_api
 from app.api import security as security_api
 from app.api import settings as settings_api
 from app.api import stats as stats_api
@@ -287,6 +289,8 @@ app.include_router(imports_api.router)
 app.include_router(otp_api.router)
 app.include_router(roles_api.router)
 app.include_router(workflows_api.router)
+app.include_router(parcours_api.router)
+app.include_router(reference_lists_api.router)
 app.include_router(health_api.router)
 app.include_router(web_webhook.router)
 app.include_router(whatsapp_webhook.router)
