@@ -51,6 +51,13 @@ CREATE TRIGGER ma2e_audit_no_truncate
 """
 
 
+SOCIETAIRES_LATE_COLUMNS = [
+    ("boite_postale", "VARCHAR(128)"),
+    ("nom_conjoint", "VARCHAR(255)"),
+    ("personne_a_prevenir", "VARCHAR(255)"),
+]
+
+
 def _split_sql(sql: str) -> list[str]:
     """Découpe un bloc SQL en statements individuels — asyncpg refuse les
     multi-commandes dans un prepared statement. On respecte les corps
@@ -78,6 +85,9 @@ async def bootstrap_db() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
+        # create_all ne modifie pas les tables existantes : colonnes ajoutées après coup (idempotent)
+        for col, typ in SOCIETAIRES_LATE_COLUMNS:
+            await conn.execute(text(f"ALTER TABLE societaires ADD COLUMN IF NOT EXISTS {col} {typ}"))
         # F-12 — pose le trigger append-only sur audit_logs
         for stmt in _split_sql(AUDIT_APPEND_ONLY_SQL):
             await conn.execute(text(stmt))

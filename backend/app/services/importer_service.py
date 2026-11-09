@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 from uuid import UUID
@@ -30,8 +31,10 @@ from app.models import Collaborateur, Employeur
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_TARGETS = {"employeurs", "collaborateurs"}
+SUPPORTED_TARGETS = {"employeurs", "collaborateurs", "societaires"}
 MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 Mo
+# La base sociétaires complète (≈ plusieurs milliers de lignes x 56 colonnes) est plus lourde
+MAX_FILE_BYTES_BY_TARGET = {"societaires": 50 * 1024 * 1024}  # 50 Mo
 
 
 @dataclass
@@ -45,9 +48,14 @@ class ImportRow:
 class ImportReport:
     target: str
     total_lines: int = 0
-    accepted: int = 0
+    accepted: int = 0   # lignes créées
+    updated: int = 0    # lignes existantes mises à jour (upsert, cible « societaires »)
     rejected: int = 0
+    dry_run: bool = False
     errors: list[dict] = field(default_factory=list)  # {line, error, data}
+    # Lignes importées mais avec une valeur à vérifier (date illisible laissée vide,
+    # matricule saisi comme nombre dans Excel...) : {line, id_client, warning}
+    warnings: list[dict] = field(default_factory=list)
     inserted_ids: list[str] = field(default_factory=list)
 
     def add_error(self, line: int, message: str, data: dict) -> None:
@@ -65,27 +73,35 @@ async def import_referential(
     target: str,
     filename: str,
     raw_bytes: bytes,
+    dry_run: bool = False,
 ) -> ImportReport:
     """Entrée unique pour tous les imports.
 
     Lève ValueError si target invalide ou fichier trop gros / format non supporté.
+    `dry_run` n'est honoré que pour « societaires » (valide + compte sans écrire).
     """
     if target not in SUPPORTED_TARGETS:
         raise ValueError(
             f"Référentiel non supporté : {target}. "
             f"Supportés : {sorted(SUPPORTED_TARGETS)}"
         )
-    if len(raw_bytes) > MAX_FILE_BYTES:
-        raise ValueError(f"Fichier trop volumineux ({len(raw_bytes)} > {MAX_FILE_BYTES} octets)")
+    max_bytes = MAX_FILE_BYTES_BY_TARGET.get(target, MAX_FILE_BYTES)
+    if len(raw_bytes) > max_bytes:
+        raise ValueError(f"Fichier trop volumineux ({len(raw_bytes)} > {max_bytes} octets)")
 
     rows = _parse_file(filename, raw_bytes)
 
-    report = ImportReport(target=target, total_lines=len(rows))
+    report = ImportReport(target=target, total_lines=len(rows), dry_run=dry_run)
 
     if target == "employeurs":
         await _import_employeurs(db, tenant_id, rows, report)
     elif target == "collaborateurs":
         await _import_collaborateurs(db, tenant_id, rows, report)
+    elif target == "societaires":
+        from app.services.societaire_import import import_societaires
+        await import_societaires(
+            db, tenant_id, rows, report, source_file=filename, dry_run=dry_run
+        )
 
     return report
 
@@ -98,7 +114,13 @@ def _parse_file(filename: str, raw: bytes) -> list[dict]:
     lower = filename.lower()
     if lower.endswith(".csv") or lower.endswith(".txt"):
         return _parse_csv(raw)
-    if lower.endswith(".xlsx") or lower.endswith(".xls"):
+    if lower.endswith(".xls"):
+        # Ancien format binaire Excel 97-2003 : openpyxl ne le lit pas
+        raise ValueError(
+            "Format .xls (Excel 97-2003) non supporté. Ouvrez le fichier dans Excel puis "
+            "« Enregistrer sous » au format .xlsx (ou CSV), et réimportez-le."
+        )
+    if lower.endswith(".xlsx"):
         return _parse_xlsx(raw)
     raise ValueError(
         "Format non supporté. Utilisez CSV (UTF-8) ou Excel (.xlsx)."
@@ -125,6 +147,25 @@ def _parse_csv(raw: bytes) -> list[dict]:
     return [{_norm_key(k): (v.strip() if isinstance(v, str) else v) for k, v in row.items()} for row in reader]
 
 
+_ZERO_PAD_FORMAT = re.compile(r"^0{2,}$")
+
+
+def _cell_value(cell: Any) -> Any:
+    """Valeur d'une cellule, en rétablissant les zéros initiaux masqués par Excel.
+
+    Un matricule « 00006 » saisi dans une cellule au format NOMBRE est stocké 6 ;
+    s'il est affiché avec un format personnalisé « 00000 », on le reconstitue
+    (« 00006 »). Sans format de ce type, la valeur est rendue telle quelle.
+    """
+    value = getattr(cell, "value", None)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    fmt = getattr(cell, "number_format", "") or ""
+    if _ZERO_PAD_FORMAT.match(fmt) and float(value).is_integer() and value >= 0:
+        return str(int(value)).zfill(len(fmt))
+    return value
+
+
 def _parse_xlsx(raw: bytes) -> list[dict]:
     try:
         from openpyxl import load_workbook
@@ -133,9 +174,16 @@ def _parse_xlsx(raw: bytes) -> list[dict]:
             "Le module openpyxl n'est pas installé. "
             "Utilisez le format CSV ou contactez votre administrateur."
         )
-    wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
+    try:
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        ws = wb.active
+        rows = [[_cell_value(c) for c in r] for r in ws.iter_rows()]
+    except Exception as e:  # fichier corrompu, renommé en .xlsx, protégé par mot de passe...
+        logger.info("Lecture xlsx impossible : %s", e)
+        raise ValueError(
+            "Fichier Excel illisible. Vérifiez qu'il s'agit bien d'un .xlsx non protégé "
+            "par mot de passe (au besoin, réenregistrez-le depuis Excel)."
+        ) from e
     if not rows:
         return []
     headers = [_norm_key(str(h or "")) for h in rows[0]]
@@ -370,4 +418,15 @@ def template_csv(target: str) -> str:
             "SODECI-09812;SODECI;COULIBALY;Salimata;;;Responsable clientèle;2018-03-01;actif\n"
             "ERANOVE-00500;ERANOVE;DOUMBIA;Mariam;mariam.doumbia@eranove.com;;Directrice RH groupe;2010-09-15;actif\n"
         )
+    if target == "societaires":
+        # En-têtes du fichier source MA2E (seules id_client et nom_client sont obligatoires)
+        cols = (
+            "code_categorie_client;id_client;code_client;num_manuel;nom_client;prenoms_client;"
+            "id_agence;nom_agence;code_agence;sexe;civilite;statut_matrimonial;telephone;"
+            "date_adhesion;date_naissance;lieu_naissance;nationalite;code_type_piece;"
+            "type_piece_identite;numero_piece_identite;email;code_profession;profession;bp;"
+            "ville;adresse;code_type_client;type_client;categorie_client;date_depart;"
+            "motif_depart;CATEGORIE(1);EMPLOYEUR(2);NOM DE MERE(3);CONSENTEMENT RECU(4)"
+        )
+        return "﻿" + cols + "\n"
     raise ValueError(f"Pas de template pour : {target}")

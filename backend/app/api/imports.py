@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -72,6 +72,7 @@ async def download_template(
 async def import_referential(
     target: str,
     file: UploadFile = File(...),
+    dry_run: bool = Query(False, description="Valide et compte sans écrire (cible societaires)."),
     db: AsyncSession = Depends(get_db),
     ctx: AuthContext = Depends(get_auth_context),
 ):
@@ -98,11 +99,13 @@ async def import_referential(
             target=target,
             filename=file.filename or "upload",
             raw_bytes=raw,
+            dry_run=dry_run,
         )
     except ValueError as e:
+        await db.rollback()
         raise HTTPException(status_code=422, detail=str(e))
 
-    if report.accepted > 0:
+    if not dry_run and (report.accepted > 0 or report.updated > 0):
         await db.commit()
 
     # Audit (US-37 AC6 : tracé qui, quoi, quand, volume)
@@ -118,7 +121,10 @@ async def import_referential(
             "filename": file.filename,
             "total_lines": report.total_lines,
             "accepted": report.accepted,
+            "updated": report.updated,
             "rejected": report.rejected,
+            "warnings": len(report.warnings),
+            "dry_run": dry_run,
         },
     )
     await db.commit()

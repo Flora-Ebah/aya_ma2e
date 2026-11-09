@@ -44,6 +44,7 @@ from app.models.rbac import (
     UserCustomRole,
     empty_permissions,
 )
+from app.models.societaire import Societaire
 from app.models.tenant import Tenant, TenantChannel
 from app.models.user import AuthMethod, User, UserRole
 from app.models.webhook import WebhookDelivery, WebhookStatus
@@ -84,6 +85,7 @@ __all__ = [
     "PieceType",
     "ReferenceList",
     "SettingValueType",
+    "Societaire",
     "Tenant",
     "TenantChannel",
     "TenantSetting",
