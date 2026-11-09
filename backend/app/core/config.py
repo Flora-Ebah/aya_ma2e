@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"
     minio_secure: bool = False
+    # Optionnel. Renseigné (ex. « us-east-1 », défaut serveur MinIO), le client
+    # n'interroge plus le serveur pour connaître la région du bucket avant de
+    # signer une URL : la signature devient locale. Sans cela, MinIO injoignable
+    # = ~18 s de tentatives par URL (fiche PDF avec photo). Vide = comportement d'origine.
+    minio_region: str = ""
 
     jwt_secret: str
     jwt_algorithm: str = "HS256"

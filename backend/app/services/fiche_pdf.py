@@ -28,70 +28,88 @@ PAGE_WIDTH = 695.0
 PAGE_HEIGHT = 842.0
 
 # Configuration des positions. Chaque entrée : (x, y, max_width).
-# y correspond à la ligne de base du texte en coordonnées PDF (0 = bas).
-LEFT_X = 135.0
-LEFT_W = 210.0
-RIGHT_X = 462.0
+# y = ligne de base du texte en coordonnées PDF (0 = bas) : c'est EXACTEMENT la
+# ligne de base du libellé correspondant dans le template (relevée avec PyMuPDF),
+# pour que valeur et libellé soient alignés comme sur la fiche Perfect Vision
+# de référence. Les x (141 / 464 / 326) sont ceux de cette fiche de référence.
+LEFT_X = 141.0
+LEFT_W = 195.0
+RIGHT_X = 464.0
 RIGHT_W = 220.0
+TABLE_X = 326.0
+TABLE_W = 355.0
+FONT_SIZE = 10.0          # même corps que les libellés du template
+OBS_LINE_HEIGHT = 12.6    # interligne des observations multi-lignes (fiche de référence)
 
 # Champ → (x, y, max_w)
 POSITIONS: dict[str, tuple[float, float, float]] = {
-    # En-tête (coin haut droit)
-    "imprime_le":    (505, 814, 180),
-    "imprime_par":   (505, 802, 180),
-    "journee":       (505, 790, 180),
+    # En-tête (coin haut droit) — à droite des libellés « Imprimé le : » etc.
+    "imprime_le":    (507, 813.6, 180),
+    "imprime_par":   (507, 801.6, 180),
+    "journee":       (507, 789.6, 180),
 
     # Code / Numéro manuel (ligne du dessus)
-    "code":          (90,  739, 290),
-    "numero_manuel": (480, 739, 200),
+    "code":          (140, 736.7, 250),
+    "numero_manuel": (507, 736.7, 180),
 
-    # Colonne gauche (labels à x≈26, valeurs à partir de 135)
-    "type_client":     (LEFT_X, 709, LEFT_W),
-    "civilite":        (LEFT_X, 688, LEFT_W),
-    "nom":             (LEFT_X, 666, LEFT_W),
-    "prenoms":         (LEFT_X, 644, LEFT_W),
-    "situation_matri": (LEFT_X, 622, LEFT_W),
-    "date_naissance":  (LEFT_X, 600, LEFT_W),
-    "lieu_naissance":  (LEFT_X, 578, LEFT_W),
-    "piece_identite":  (LEFT_X, 556, LEFT_W),
-    "num_piece":       (LEFT_X, 533, LEFT_W),
-    "domicile":        (LEFT_X, 512, LEFT_W),
-    "boite_postale":   (LEFT_X, 489, LEFT_W),
-    "telephone":       (LEFT_X, 467, LEFT_W),
-    "email":           (LEFT_X, 446, LEFT_W),
-    "situation_geo":   (LEFT_X, 422, LEFT_W),
-    "distance_agence": (LEFT_X, 400, LEFT_W),
-    "profession":      (LEFT_X, 380, LEFT_W),
-    "nom_conjoint":    (LEFT_X, 357, LEFT_W),
-    "nom_prevenir":    (LEFT_X, 334, LEFT_W),
+    # Colonne gauche
+    "type_client":     (LEFT_X, 708.7, LEFT_W),
+    "civilite":        (LEFT_X, 686.7, LEFT_W),
+    "nom":             (LEFT_X, 664.7, LEFT_W),
+    "prenoms":         (LEFT_X, 642.7, LEFT_W),
+    "situation_matri": (LEFT_X, 620.7, LEFT_W),
+    "date_naissance":  (LEFT_X, 598.7, LEFT_W),
+    "lieu_naissance":  (LEFT_X, 576.7, LEFT_W),
+    "piece_identite":  (LEFT_X, 554.7, LEFT_W),
+    "num_piece":       (LEFT_X, 532.7, LEFT_W),
+    "domicile":        (LEFT_X, 510.7, LEFT_W),
+    "boite_postale":   (LEFT_X, 488.7, LEFT_W),
+    "telephone":       (LEFT_X, 466.7, LEFT_W),
+    "email":           (LEFT_X, 444.7, LEFT_W),
+    "situation_geo":   (LEFT_X, 422.7, LEFT_W),
+    "distance_agence": (LEFT_X, 400.7, LEFT_W),
+    "profession":      (LEFT_X, 378.7, LEFT_W),
+    "nom_conjoint":    (LEFT_X, 356.7, LEFT_W),
+    "nom_prevenir":    (LEFT_X, 334.7, LEFT_W),
 
-    # Colonne droite (labels à x≈350, valeurs à partir de 462)
-    "num_compte":      (RIGHT_X, 582, RIGHT_W),
-    "adr_prevenir":    (RIGHT_X, 561, RIGHT_W),
-    "beneficiaire":    (RIGHT_X, 540, RIGHT_W),
-    "tuteur":          (RIGHT_X, 517, RIGHT_W),
-    "ayant_droit":     (RIGHT_X, 492, RIGHT_W),
-    "nb_signatures":   (RIGHT_X, 467, RIGHT_W),
-    "date_inscription":(RIGHT_X, 428, RIGHT_W),
-    "gestionnaire":    (RIGHT_X, 408, RIGHT_W),
-    "nom_tuteur":      (RIGHT_X, 386, RIGHT_W),
-    "observations":    (RIGHT_X, 362, RIGHT_W),
+    # Colonne droite
+    "num_compte":      (RIGHT_X, 581.7, RIGHT_W),
+    "adr_prevenir":    (RIGHT_X, 561.7, RIGHT_W),
+    "beneficiaire":    (RIGHT_X, 538.7, RIGHT_W),
+    "tuteur":          (RIGHT_X, 515.7, RIGHT_W),
+    "ayant_droit":     (RIGHT_X, 492.7, RIGHT_W),
+    "nb_signatures":   (RIGHT_X, 470.7, RIGHT_W),
+    "date_inscription":(RIGHT_X, 428.7, RIGHT_W),
+    "gestionnaire":    (RIGHT_X, 406.7, RIGHT_W),
+    "nom_tuteur":      (RIGHT_X, 384.7, RIGHT_W),
+    "observations":    (RIGHT_X, 360.7, RIGHT_W),   # jusqu'à 2 lignes (voir _text_multiline)
 
-    # Table Attribut / Valeur (colonne Valeur à partir de x≈350, y des lignes)
-    "cat_val":         (350, 280, 330),
-    "emp_val":         (350, 260, 330),
-    "cons_val":        (350, 240, 330),
-    "mere_val":        (350, 220, 330),
+    # Table Attribut / Valeur
+    "cat_val":         (TABLE_X, 278.7, TABLE_W),
+    "emp_val":         (TABLE_X, 258.7, TABLE_W),
+    "cons_val":        (TABLE_X, 238.7, TABLE_W),
+    "mere_val":        (TABLE_X, 218.7, TABLE_W),
 }
+HEADER_KEYS = {"imprime_le", "imprime_par", "journee"}  # restent en 9 pt comme l'en-tête du template
 
 # Zone photo (encadré) : x=[455..680], y=[620..720] approximativement
-PHOTO_BOX = (455, 620, 100, 100)  # x, y, w, h
+# Cadre photo du template : x=441, y=632, 101 x 88 (relevé avec PyMuPDF) → 2 pt de marge intérieure.
+# (L'ancienne zone 455/620/100x100 débordait du cadre à droite et en bas.)
+PHOTO_BOX = (443, 634, 97, 84)  # x, y, w, h
 
-# Zone signature (cadre droit sous VISA)
-SIGNATURE_BOX = (382, 50, 112, 75)
+# Cadre bas du template : x=143..532, y=57..145, coupé en deux (VISA | Date et signature du client).
+# Zone signature = moitié droite, sous le libellé (l'ancienne zone y=50 sortait sous le cadre).
+SIGNATURE_BOX = (342, 60, 186, 68)
 
 
-def _text(c: canvas.Canvas, key: str, value: Optional[str], font_size: float = 9.0) -> None:
+def _fit(c: canvas.Canvas, s: str, max_w: float, font_size: float) -> str:
+    """Tronque avec « … » si le texte dépasse la largeur max (évite de déborder sur la colonne voisine)."""
+    while c.stringWidth(s, "Helvetica", font_size) > max_w and len(s) > 4:
+        s = s[:-2] + "…"
+    return s
+
+
+def _text(c: canvas.Canvas, key: str, value: Optional[str], font_size: Optional[float] = None) -> None:
     """Écrit un texte à la position du champ, en respectant la largeur max."""
     if value is None:
         return
@@ -103,12 +121,86 @@ def _text(c: canvas.Canvas, key: str, value: Optional[str], font_size: float = 9
         logger.warning("fiche_pdf: position inconnue pour '%s'", key)
         return
     x, y, max_w = pos
-    c.setFont("Helvetica", font_size)
-    # Tronque si dépasse la largeur max (évite les débordements sur les colonnes voisines)
-    truncated = s
-    while c.stringWidth(truncated, "Helvetica", font_size) > max_w and len(truncated) > 4:
-        truncated = truncated[:-2] + "…"
-    c.drawString(x, y, truncated)
+    size = font_size or (9.0 if key in HEADER_KEYS else FONT_SIZE)
+    c.setFont("Helvetica", size)
+    c.drawString(x, y, _fit(c, s, max_w, size))
+
+
+def _text_multiline(c: canvas.Canvas, key: str, value: Optional[str], max_lines: int = 2) -> None:
+    """Comme `_text` mais retourne à la ligne (par mots) sous la position, `max_lines` max."""
+    s = str(value or "").strip()
+    if not s:
+        return
+    x, y, max_w = POSITIONS[key]
+    c.setFont("Helvetica", FONT_SIZE)
+    lines: list[str] = []
+    cur = ""
+    for word in s.split():
+        cand = f"{cur} {word}".strip()
+        if c.stringWidth(cand, "Helvetica", FONT_SIZE) <= max_w or not cur:
+            cur = cand
+        else:
+            lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines - 1] + [" ".join(lines[max_lines - 1:])]
+    for i, line in enumerate(lines):
+        c.drawString(x, y - i * OBS_LINE_HEIGHT, _fit(c, line, max_w, FONT_SIZE))
+
+
+_SITUATION_LABELS = {
+    "celibataire": "Célibataire", "c": "Célibataire",
+    "marie": "Marié(e)", "m": "Marié(e)",
+    "divorce": "Divorcé(e)", "d": "Divorcé(e)",
+    "veuf": "Veuf(ve)", "v": "Veuf(ve)",
+}
+
+
+def _situation_label(v: Optional[str]) -> str:
+    """Code stocké (« marie ») → libellé de la fiche de référence (« Marié(e) »)."""
+    if not v:
+        return ""
+    return _SITUATION_LABELS.get(str(v).strip().lower(), str(v))
+
+
+def _fmt_date(v: Optional[str]) -> str:
+    """ISO « 1981-10-14 » (format OCR) → « 14/10/1981 » ; tout autre format est laissé tel quel."""
+    if not v:
+        return ""
+    s = str(v).strip()
+    try:
+        return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%d/%m/%Y")
+    except ValueError:
+        return s
+
+
+def _ocr_fields(dossier: Dossier) -> dict:
+    """Champs lus par l'OCR sur la pièce (recto, puis MRZ du verso en complément).
+
+    Sert de repli quand l'usager n'a pas saisi son identité lui-même (parcours
+    réduit) : sans cela nom, prénoms, date de naissance et n° de pièce restaient
+    vides sur la fiche alors que l'OCR les avait lus.
+    """
+    out: dict = {}
+    pieces = list(getattr(dossier, "pieces", None) or [])
+    for p in pieces:
+        face = getattr(p.face, "value", p.face)
+        data = p.ocr_data or {}
+        if face == "recto":
+            for k, v in (data.get("fields") or {}).items():
+                if v and k not in out:
+                    out[k] = v
+            out.setdefault("_piece_type", getattr(p.piece_type, "value", p.piece_type))
+    for p in pieces:
+        if getattr(p.face, "value", p.face) == "verso":
+            parsed = ((p.ocr_data or {}).get("mrz") or {}).get("parsed") or {}
+            for src, dst in (("nom", "nom"), ("prenoms", "prenoms"),
+                             ("document_number", "numero_piece"), ("date_naissance_iso", "date_naissance")):
+                if parsed.get(src) and dst not in out:
+                    out[dst] = parsed[src]
+    return out
 
 
 def _piece_label(t: Optional[str]) -> str:
@@ -169,6 +261,17 @@ def generate_fiche_pdf(
     nom = parts[-1] if parts else ""
     prenoms = " ".join(parts[:-1]) if len(parts) > 1 else ""
 
+    # Repli sur l'OCR de la pièce quand l'usager n'a pas saisi son identité
+    ocr = _ocr_fields(dossier)
+    if not nom and not prenoms:
+        nom = str(ocr.get("nom") or "")
+        prenoms = str(ocr.get("prenoms") or "")
+
+    # Observations : comme la fiche de référence, on y reporte la date d'embauche
+    observations = extra.get("observations") or (
+        f"date d'embauche : {extra['date_embauche']}" if extra.get("date_embauche") else ""
+    )
+
     now = datetime.now()
 
     values = {
@@ -179,15 +282,16 @@ def generate_fiche_pdf(
         "code":            dossier.numero_societaire or dossier.dossier_number or "",
         "numero_manuel":   dossier.matricule or "",
 
-        "type_client":     extra.get("type_client", ""),
+        # Type client = employeur, comme sur la fiche Perfect Vision de référence
+        "type_client":     extra.get("type_client") or dossier.employeur_code or "",
         "civilite":        extra.get("civilite", ""),
         "nom":             nom,
         "prenoms":         prenoms,
-        "situation_matri": (donnees.situation_familiale if donnees else "") or "",
-        "date_naissance":  extra.get("date_naissance", ""),
+        "situation_matri": _situation_label(donnees.situation_familiale if donnees else ""),
+        "date_naissance":  _fmt_date(extra.get("date_naissance") or ocr.get("date_naissance")),
         "lieu_naissance":  extra.get("lieu_naissance", ""),
-        "piece_identite":  _piece_label(extra.get("type_piece")),
-        "num_piece":       extra.get("numero_piece", ""),
+        "piece_identite":  _piece_label(extra.get("type_piece") or ocr.get("_piece_type")),
+        "num_piece":       extra.get("numero_piece") or ocr.get("numero_piece") or "",
         "domicile":        extra.get("domicile") or extra.get("adresse_domicile", ""),
         "boite_postale":   extra.get("boite_postale_choisie") or extra.get("boite_postale", ""),
         "telephone":       (end_user.phone if end_user else "") or "",
@@ -207,7 +311,6 @@ def generate_fiche_pdf(
         "date_inscription":dossier.created_at.strftime("%d/%m/%Y") if dossier.created_at else "",
         "gestionnaire":    extra.get("gestionnaire") or "",
         "nom_tuteur":      extra.get("nom_tuteur", ""),
-        "observations":    extra.get("observations", ""),
 
         "cat_val":         extra.get("categorie", ""),
         "emp_val":         dossier.employeur_code or "",
@@ -223,6 +326,7 @@ def generate_fiche_pdf(
 
     for key, val in values.items():
         _text(c, key, val)
+    _text_multiline(c, "observations", observations)
 
     # Photo (recto pièce) + signature
     _draw_image(c, photo_url, PHOTO_BOX)
@@ -232,13 +336,12 @@ def generate_fiche_pdf(
     c.save()
     overlay_buf.seek(0)
 
-    # Fusionne overlay + template
-    template = PdfReader(str(TEMPLATE_PATH))
+    # Fusionne overlay + template.
+    # La page doit appartenir au writer AVANT merge_page : pypdf 7 a supprimé
+    # la fusion sur une page « orpheline » (ancienne approche → HTTP 500).
     overlay = PdfReader(overlay_buf)
-    writer = PdfWriter()
-    base_page = template.pages[0]
-    base_page.merge_page(overlay.pages[0])
-    writer.add_page(base_page)
+    writer = PdfWriter(clone_from=str(TEMPLATE_PATH))
+    writer.pages[0].merge_page(overlay.pages[0])
 
     out_buf = io.BytesIO()
     writer.write(out_buf)
