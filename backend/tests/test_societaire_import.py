@@ -285,6 +285,37 @@ def test_import_logic() -> None:
     db, rep = _run([])
     _assert(rep.accepted == 0 and db.inserts == [], "fichier vide : aucune écriture")
 
+    # Fichier PARTIEL (quelques colonnes) : un sociétaire existant ne doit perdre aucune
+    # des autres colonnes importées avant (date d'adhésion, lieu de naissance...).
+    from app.services.societaire_import import COLUMN_SOURCES, updatable_columns
+    partial = [{"id_client": "OLD", "nom_client": "X", "telephone": "0707070707"}]
+    db, rep = _run(partial, existing={"OLD"})
+    sql = str(db.inserts[0].compile(dialect=postgresql.dialect()))
+    set_part = sql.split("DO UPDATE SET", 1)[1]
+    import re as _re
+    set_cols = set(_re.findall(r"(?:^\s*|, )(\w+) = ", set_part))
+    for col in ("telephone", "telephone_norm", "nom"):
+        _assert(col in set_cols, f"partiel : {col} mis à jour")
+    for col in ("date_adhesion", "lieu_naissance", "matricule", "email", "actif", "employeur_code"):
+        _assert(col not in set_cols, f"partiel : {col} NON écrasé")
+    _assert("telephone = coalesce(excluded.telephone, societaires.telephone)" in set_part,
+            "cellule vide / illisible : la valeur existante est conservée")
+    _assert("nom = excluded.nom" in set_part, "nom (obligatoire) : toujours remplacé")
+    db, _ = _run([{"id_client": "OLD", "nom_client": "X", "date_depart": "01/01/2020"}], existing={"OLD"})
+    set_part = str(db.inserts[0].compile(dialect=postgresql.dialect())).split("DO UPDATE SET", 1)[1]
+    _assert("actif = (coalesce(excluded.date_depart, societaires.date_depart) IS NULL)" in set_part,
+            "actif recalculé sur la date de départ finale")
+    _assert("extra = (societaires.extra || excluded.extra)" in set_part,
+            "extra fusionné (jsonb ||) : historique _modifications conservé")
+
+    # Fichier complet : toutes les colonnes mises à jour
+    cols = clean_row(_row(), "f").keys()
+    full = updatable_columns({_norm(h) for h in SOURCE_HEADERS}, cols)
+    _assert(set(full) == set(cols) - {"id_client", "extra"}, "fichier complet : toutes les colonnes")
+    # Garde-fou : toute nouvelle colonne de clean_row doit être déclarée dans COLUMN_SOURCES
+    undeclared = set(cols) - set(COLUMN_SOURCES) - {"id_client", "extra", "nom", "source_file"}
+    _assert(not undeclared, f"colonnes absentes de COLUMN_SOURCES : {undeclared}")
+
 
 # ==========================================================================
 # D. import_referential depuis un vrai .xlsx

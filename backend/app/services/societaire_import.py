@@ -215,6 +215,35 @@ def clean_row(row: dict, source_file: str, warnings: Optional[list[str]] = None)
     }
 
 
+# Colonne de la table → en-têtes sources (normalisés) qui l'alimentent. Une colonne absente
+# de ce dict (nom, source_file) est toujours mise à jour ; `id_client` et `extra` à part.
+COLUMN_SOURCES: dict[str, tuple[str, ...]] = {
+    "code_client": ("code_client",),
+    "matricule": ("num_manuel",), "matricule_norm": ("num_manuel",),
+    "prenoms": ("prenoms_client",), "sexe": ("sexe",), "civilite": ("civilite",),
+    "statut_matrimonial": ("statut_matrimonial",), "date_naissance": ("date_naissance",),
+    "lieu_naissance": ("lieu_naissance",), "nationalite": ("nationalite",),
+    "type_piece": ("type_piece_identite",),
+    "numero_piece": ("numero_piece_identite",), "cni_norm": ("numero_piece_identite",),
+    "telephone": ("telephone",), "telephone_norm": ("telephone",),
+    "email": ("email",), "adresse": ("adresse",), "ville": ("ville",), "boite_postale": ("bp",),
+    "profession": ("profession",), "employeur_code": ("employeur(2)", "type_client"),
+    "categorie_client": ("categorie(1)",), "agence": ("nom_agence",),
+    "date_adhesion": ("date_adhesion",), "date_depart": ("date_depart",),
+    "motif_depart": ("motif_depart",), "actif": ("date_depart",),
+    "nom_mere": ("nom_de_mere(3)",), "consentement_recu": ("consentement_recu(4)",),
+}
+
+
+def updatable_columns(headers: set[str], columns) -> list[str]:
+    """Colonnes à mettre à jour pour un sociétaire existant, d'après les en-têtes du fichier."""
+    return [
+        c for c in columns
+        if c not in ("id_client", "extra")
+        and (c not in COLUMN_SOURCES or any(h in headers for h in COLUMN_SOURCES[c]))
+    ]
+
+
 # ====================================================================== #
 # Import
 # ====================================================================== #
@@ -275,13 +304,33 @@ async def import_societaires(
     if dry_run:
         return
 
-    update_cols = [c for c in cleaned[0].keys() if c != "id_client"]
+    # Mise à jour PARTIELLE : un sociétaire existant ne voit changer que les colonnes que
+    # le fichier contient. Un fichier réduit (ex. id_client + telephone) ne doit pas effacer
+    # la date d'adhésion, le lieu de naissance… importés avant depuis le fichier complet.
+    update_cols = updatable_columns(set(rows[0].keys()), cleaned[0].keys())
+    table = Societaire.__table__
     for k in range(0, len(cleaned), BATCH_SIZE):
         batch = [{**c, "tenant_id": tenant_id} for c in cleaned[k:k + BATCH_SIZE]]
         stmt = pg_insert(Societaire).values(batch)
+        ex = stmt.excluded
+
+        def _set(col: str):
+            if col in ("nom", "source_file"):          # toujours renseignés
+                return ex[col]
+            if col == "actif":                         # recalculé sur la date de départ FINALE
+                return func.coalesce(ex.date_depart, table.c.date_depart).is_(None)
+            # Cellule vide ou illisible (→ NULL) : on garde la valeur déjà en base
+            return func.coalesce(ex[col], table.c[col])
+
         stmt = stmt.on_conflict_do_update(
             constraint="uq_societaire_id_client",
-            set_={col: stmt.excluded[col] for col in update_cols} | {"imported_at": func.now(), "updated_at": func.now()},
+            set_={col: _set(col) for col in update_cols} | {
+                # extra = ligne source : on FUSIONNE (jsonb ||) pour garder les colonnes absentes
+                # de ce fichier et l'historique `_modifications` des mises à jour faites par chat.
+                "extra": Societaire.__table__.c.extra.op("||")(stmt.excluded.extra),
+                "imported_at": func.now(),
+                "updated_at": func.now(),
+            },
         )
         await db.execute(stmt)
     logger.info("Import sociétaires : %d créés, %d mis à jour, %d rejetés",
