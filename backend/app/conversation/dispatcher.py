@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.conversation import default_actions  # noqa: F401 (enregistre les actions)
 from app.conversation import handoff_actions  # noqa: F401 (enregistre lookup/update/rag)
+from app.conversation import societaire_actions  # noqa: F401 (enregistre lookup_societaire)
 from app.conversation import llm_actions  # noqa: F401 (build_recap, send_otp, verify_otp)
 from app.conversation import workflow_executor
 from app.conversation.utils import BotReply
