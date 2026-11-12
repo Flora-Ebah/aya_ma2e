@@ -58,6 +58,18 @@ SOCIETAIRES_LATE_COLUMNS = [
 ]
 
 
+# Lien dossier <-> sociétaire importé (create_all ne modifie pas la table `dossiers` existante)
+# Valeurs ajoutées à l'énumération d'audit APRÈS coup : create_all ne modifie pas un type PostgreSQL existant.
+AUDIT_LATE_ENUM_VALUES = ["referentiel_added", "referentiel_updated", "referentiel_removed"]
+
+DOSSIERS_LATE_DDL = [
+    "ALTER TABLE employeurs ADD COLUMN IF NOT EXISTS matricule_format VARCHAR(120)",
+    "ALTER TABLE employeurs ADD COLUMN IF NOT EXISTS matricule_exemple VARCHAR(64)",
+    "ALTER TABLE dossiers ADD COLUMN IF NOT EXISTS societaire_id UUID REFERENCES societaires(id) ON DELETE SET NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_dossiers_societaire_id ON dossiers (societaire_id)",
+]
+
+
 def _split_sql(sql: str) -> list[str]:
     """Découpe un bloc SQL en statements individuels — asyncpg refuse les
     multi-commandes dans un prepared statement. On respecte les corps
@@ -88,6 +100,10 @@ async def bootstrap_db() -> None:
         # create_all ne modifie pas les tables existantes : colonnes ajoutées après coup (idempotent)
         for col, typ in SOCIETAIRES_LATE_COLUMNS:
             await conn.execute(text(f"ALTER TABLE societaires ADD COLUMN IF NOT EXISTS {col} {typ}"))
+        for stmt in DOSSIERS_LATE_DDL:
+            await conn.execute(text(stmt))
+        for value in AUDIT_LATE_ENUM_VALUES:
+            await conn.execute(text(f"ALTER TYPE audit_action ADD VALUE IF NOT EXISTS '{value}'"))
         # F-12 — pose le trigger append-only sur audit_logs
         for stmt in _split_sql(AUDIT_APPEND_ONLY_SQL):
             await conn.execute(text(stmt))

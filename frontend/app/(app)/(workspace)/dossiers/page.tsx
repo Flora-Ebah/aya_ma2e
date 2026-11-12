@@ -1,5 +1,5 @@
 "use client";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { Icon } from "@/components/Icon";
@@ -11,7 +11,7 @@ import StatsHeader from "./_StatsHeader";
 import { countActiveAdvanced, DEFAULT_ADVANCED, type AdvancedFilters } from "./_types";
 import { useDossiersList } from "./_useDossiersList";
 
-const PAGE_SIZE = 15;
+const PAGE_SIZE = 25;
 
 /** La recherche du header envoie vers `/dossiers?q=…` : la page enveloppe son contenu dans Suspense (useSearchParams). */
 export default function DossiersPage() {
@@ -26,13 +26,18 @@ function DossiersPageContent() {
   const searchParams = useSearchParams();
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [search, setSearch] = useState("");
+  const [query, setQuery] = useState(""); // recherche envoyée au serveur (après 300 ms sans frappe)
+  // `?origine=import` : lien « Voir les sociétaires importés » de la fenêtre d'import
+  const [origine, setOrigine] = useState(searchParams.get("origine") ?? "");
   const [advanced, setAdvanced] = useState<AdvancedFilters>(DEFAULT_ADVANCED);
   const [pendingAdvanced, setPendingAdvanced] = useState<AdvancedFilters>(DEFAULT_ADVANCED);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  const { dossiers, stats, loading, error, reload } = useDossiersList(statusFilter, advanced);
+  const { dossiers, total, stats, loading, error, reload } = useDossiersList(statusFilter, advanced, {
+    q: query, origine, page, pageSize: PAGE_SIZE,
+  });
 
   function toggleSelect(id: string) {
     setSelected((prev) => {
@@ -58,16 +63,11 @@ function DossiersPageContent() {
     window.open(api.bulkFichesPdfUrl(ids), "_blank", "noopener");
   }
 
-  const filtered = useMemo(() => {
-    if (!search.trim()) return dossiers;
-    const q = search.toLowerCase();
-    return dossiers.filter((d) =>
-      d.dossier_number.toLowerCase().includes(q) ||
-      (d.end_user_name || "").toLowerCase().includes(q) ||
-      (d.matricule || "").toLowerCase().includes(q) ||
-      (d.end_user_contact || "").toLowerCase().includes(q)
-    );
-  }, [dossiers, search]);
+  // Recherche : le filtrage se fait côté serveur (sur toute la base, pas seulement la page affichée)
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
 
   // Pré-remplit / met à jour la recherche depuis `?q=` (recherche du header).
   const qParam = searchParams.get("q");
@@ -76,12 +76,7 @@ function DossiersPageContent() {
   }, [qParam]);
 
   // Retour en page 1 dès que le jeu de résultats change.
-  useEffect(() => { setPage(1); }, [search, statusFilter, advanced]);
-
-  const pageItems = useMemo(
-    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
-    [filtered, page],
-  );
+  useEffect(() => { setPage(1); }, [query, statusFilter, advanced, origine]);
 
   const activeCount = countActiveAdvanced(advanced);
   const exportUrl = api.exportDossiersUrl({
@@ -146,6 +141,8 @@ function DossiersPageContent() {
           onSearchChange={setSearch}
           statusFilter={statusFilter}
           onStatusFilterChange={setStatusFilter}
+          origine={origine}
+          onOrigineChange={setOrigine}
           advancedOpen={advancedOpen}
           onToggleAdvanced={toggleAdvanced}
           activeAdvancedCount={activeCount}
@@ -172,7 +169,7 @@ function DossiersPageContent() {
           style={{ padding: "0 var(--spacing-5) var(--spacing-3)" }}
           aria-live="polite"
         >
-          {filtered.length} dossier{filtered.length > 1 ? "s" : ""}
+          {total.toLocaleString("fr-FR")} dossier{total > 1 ? "s" : ""}
         </div>
 
         {selected.size > 0 && (
@@ -212,16 +209,16 @@ function DossiersPageContent() {
         )}
         <DossiersTable
           loading={loading}
-          items={pageItems}
-          search={search}
-          hasFilter={!!statusFilter}
+          items={dossiers}
+          search={query}
+          hasFilter={!!statusFilter || !!origine}
           onDeleted={reload}
           selected={selected}
           onToggleSelect={toggleSelect}
           onToggleSelectAll={toggleSelectAll}
         />
 
-        <ListPagination page={page} pageSize={PAGE_SIZE} total={filtered.length} onPageChange={setPage} />
+        <ListPagination page={page} pageSize={PAGE_SIZE} total={total} onPageChange={setPage} />
       </section>
     </>
   );

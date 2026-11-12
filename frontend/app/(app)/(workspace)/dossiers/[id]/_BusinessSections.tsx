@@ -137,7 +137,7 @@ export function ContactsSection({ dossier }: { dossier: any }) {
       subtitle="Formulaire d'inscription · champs 13-15"
     >
       <KVTable>
-        <KVRow label="Téléphone principal" value={dossier.end_user?.phone} mono />
+        <KVRow label="Téléphone principal" value={dossier.end_user?.phone ?? dossier.end_user?.extra?.telephone} mono />
         <KVRow label="Téléphone cellulaire" value={dossier.end_user?.extra?.telephone_cellulaire} mono />
         <KVRow label="Téléphone domicile" value={dossier.end_user?.extra?.telephone_domicile} mono />
         <KVRow label="Téléphone bureau" value={dossier.end_user?.extra?.telephone_bureau} mono />

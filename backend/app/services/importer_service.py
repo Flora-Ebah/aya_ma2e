@@ -52,6 +52,9 @@ class ImportReport:
     updated: int = 0    # lignes existantes mises à jour (upsert, cible « societaires »)
     rejected: int = 0
     dry_run: bool = False
+    # Dossiers créés / mis à jour dans la page « Dossiers » pour la base MA2E importée
+    dossiers_created: int = 0
+    dossiers_updated: int = 0
     errors: list[dict] = field(default_factory=list)  # {line, error, data}
     # Lignes importées mais avec une valeur à vérifier (date illisible laissée vide,
     # matricule saisi comme nombre dans Excel...) : {line, id_client, warning}
@@ -313,6 +316,16 @@ async def _import_collaborateurs(
     date_embauche (opt YYYY-MM-DD), statut (opt = actif)."""
     from datetime import datetime as _dt
 
+    from app.models import Employeur
+    from app.services.matricule_format import validate_for_employeur
+
+    # Formats de matricule par employeur (règle « matricule à format variable »)
+    emp_formats = {
+        e.code.upper(): (e.code, e.matricule_format, e.matricule_exemple)
+        for e in (await db.execute(select(Employeur).where(Employeur.tenant_id == tenant_id))).scalars()
+        if e.matricule_format
+    }
+
     cleaned: list[dict] = []
     seen_keys: set[tuple] = set()
 
@@ -330,6 +343,12 @@ async def _import_collaborateurs(
             report.add_error(i, "Colonne 'nom' obligatoire", row); continue
         if not prenoms:
             report.add_error(i, "Colonne 'prenoms' obligatoire", row); continue
+
+        if employeur in emp_formats:
+            code, fmt, exemple = emp_formats[employeur]
+            msg = validate_for_employeur(matricule, code, fmt, exemple)
+            if msg:
+                report.add_error(i, msg, row); continue
 
         key = (employeur, matricule)
         if key in seen_keys:

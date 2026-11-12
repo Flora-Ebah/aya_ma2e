@@ -17,6 +17,12 @@ export type Dossier = {
   locked_at?: string | null;
   age_hours?: number | null;
   is_overdue?: boolean;
+  /** « import » = sociétaire de la base MA2E importée ; « inscription » = dossier du chatbot */
+  origine?: "import" | "inscription";
+  /** Libellés des champs de la fiche non renseignés (vide = dossier complet) */
+  champs_manquants?: string[];
+  /** Nombre de champs requis (dénominateur de la barre) */
+  champs_total?: number;
 };
 
 export type Stats = { total: number; by_status: Record<string, number> };

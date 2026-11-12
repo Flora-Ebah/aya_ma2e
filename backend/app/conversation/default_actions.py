@@ -122,6 +122,15 @@ async def verify_matricule_referentiel(
     collab = result.scalar_one_or_none()
 
     if collab is None:
+        # Règle « matricule à format variable » : un matricule absent du référentiel doit au moins respecter
+        # le format d'un des employeurs (sinon c'est une faute de frappe, pas un sociétaire hors référentiel).
+        tenant_id = context.get("_tenant_id")
+        if tenant_id:
+            from app.services.matricule_format import known_format_error, load_formats
+            erreur = known_format_error(matricule, await load_formats(db, UUID(str(tenant_id)), only_active=True))
+            if erreur:
+                logger.info("Matricule %s : format inconnu", matricule)
+                return ActionResult(branch_key="not_found", message=erreur)
         # On accepte quand même (pas tous les sociétaires sont dans le référentiel)
         # mais on log et on marque "anonymous" pour parcours alternatif si désiré.
         logger.info("Matricule %s introuvable dans le référentiel", matricule)
@@ -165,14 +174,28 @@ async def check_duplicates(
     if not matricule:
         return ActionResult(branch_key=None)
 
+    # `.first()` et non `scalar_one_or_none()` : depuis l'import de la base MA2E, un même
+    # matricule peut avoir 2 dossiers (adhésion importée + inscription) → MultipleResultsFound
+    # faisait planter le parcours d'inscription. Comparaison normalisée (casse, espaces, tirets).
+    from sqlalchemy import func, or_
+    from app.services.societaire_import import norm_matricule
+    nm = norm_matricule(matricule)
+    same_matricule = [Dossier.matricule.ilike(matricule)]
+    if nm:
+        same_matricule.append(
+            func.upper(func.regexp_replace(Dossier.matricule, r"[\s\-_./]", "", "g")) == nm
+        )
     existing = (
         await db.execute(
-            select(Dossier).where(
-                Dossier.matricule.ilike(matricule),
+            select(Dossier)
+            .where(
+                or_(*same_matricule),
                 Dossier.status.in_([DossierStatus.valide, DossierStatus.soumis]),
             )
+            .order_by(Dossier.created_at.desc())
+            .limit(1)
         )
-    ).scalar_one_or_none()
+    ).scalars().first()
 
     if existing:
         return ActionResult(

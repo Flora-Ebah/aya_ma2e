@@ -3,7 +3,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -28,6 +28,8 @@ from app.schemas.dossier import (
     DossierListResponse,
     RejectRequest,
 )
+from app.services.dossier_completude import CHAMPS_REQUIS, champs_manquants
+from app.services.societaire_import import norm_matricule
 from app.services import audit_service, dossier_lock_service, member_number_service, notifications, rbac_service, webhook_service
 
 router = APIRouter(prefix="/api/dossiers", tags=["dossiers"])
@@ -56,8 +58,17 @@ async def list_dossiers(
         description="oldest_first (US-17 AC4 défaut) | newest_first | priority | overdue",
     ),
     tenant_id: Optional[UUID] = Query(None),
+    q: Optional[str] = Query(
+        None, max_length=100,
+        description="Recherche : n° de dossier, matricule, n° de sociétaire, nom, téléphone, e-mail",
+    ),
+    origine: Optional[str] = Query(
+        None, pattern="^(import|inscription)$",
+        description="import = base MA2E importée | inscription = dossiers du chatbot",
+    ),
     # F-11 — `ge=1` empêche `?limit=-1` de renvoyer une 500.
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0, description="Pagination côté serveur (avec `limit`)"),
     db: AsyncSession = Depends(get_db),
     ctx: AuthContext = Depends(get_auth_context),
 ):
@@ -111,36 +122,73 @@ async def list_dossiers(
             ])
         )
 
-    stmt = (
-        select(Dossier, EndUser)
-        .join(EndUser, EndUser.id == Dossier.end_user_id)
-        .options(selectinload(Dossier.pieces))
-        .where(*base_filters)
-    )
+    if origine == "import":
+        base_filters.append(Dossier.societaire_id.is_not(None))
+    elif origine == "inscription":
+        base_filters.append(Dossier.societaire_id.is_(None))
 
-    # Filtres dépendants des pièces (OCR score)
-    if min_ocr_score is not None or max_ocr_score is not None:
-        stmt = stmt.join(PieceIdentite, PieceIdentite.dossier_id == Dossier.id)
-        if min_ocr_score is not None:
-            stmt = stmt.where(PieceIdentite.ocr_confidence >= min_ocr_score)
-        if max_ocr_score is not None:
-            stmt = stmt.where(PieceIdentite.ocr_confidence <= max_ocr_score)
+    if q and q.strip():
+        term = f"%{q.strip()}%"
+        conds = [
+            Dossier.dossier_number.ilike(term),
+            Dossier.matricule.ilike(term),
+            Dossier.numero_societaire.ilike(term),
+            EndUser.name.ilike(term),
+            EndUser.phone.ilike(term),
+            EndUser.telegram_id.ilike(term),
+            EndUser.extra["telephone"].astext.ilike(term),   # dossiers importés (téléphone dans extra)
+            EndUser.extra["email"].astext.ilike(term),
+        ]
+        nm = norm_matricule(q)
+        if nm:  # « 016126 g » retrouve le matricule « 016126G » (séparateurs et casse ignorés)
+            conds.append(func.upper(func.regexp_replace(Dossier.matricule, r"[\s\-_./]", "", "g")) == nm)
+        base_filters.append(or_(*conds))
+
+    ocr_filter = min_ocr_score is not None or max_ocr_score is not None
+
+    def _scope(s):
+        """Mêmes jointures et filtres pour la page, le total et le récapitulatif."""
+        s = s.join(EndUser, EndUser.id == Dossier.end_user_id).where(*base_filters)
+        if ocr_filter:  # Filtres dépendants des pièces (OCR score)
+            s = s.join(PieceIdentite, PieceIdentite.dossier_id == Dossier.id)
+            if min_ocr_score is not None:
+                s = s.where(PieceIdentite.ocr_confidence >= min_ocr_score)
+            if max_ocr_score is not None:
+                s = s.where(PieceIdentite.ocr_confidence <= max_ocr_score)
+        return s
+
+    stmt = _scope(select(Dossier, EndUser)).options(selectinload(Dossier.pieces), selectinload(Dossier.donnees_pro))
+    if ocr_filter:
         stmt = stmt.distinct()
 
-    # Tri
+    # Tri (le n° de dossier départage les égalités : la pagination doit rester stable)
     if sort == "newest_first":
-        stmt = stmt.order_by(desc(Dossier.created_at))
+        stmt = stmt.order_by(desc(Dossier.created_at), Dossier.dossier_number)
     elif sort == "priority":
         # Priorité d'abord, puis du plus ancien au plus récent (US-17)
-        stmt = stmt.order_by(desc(Dossier.priority_review), Dossier.created_at.asc())
+        stmt = stmt.order_by(desc(Dossier.priority_review), Dossier.created_at.asc(), Dossier.dossier_number)
     elif sort == "overdue":
-        stmt = stmt.order_by(Dossier.created_at.asc())
+        stmt = stmt.order_by(Dossier.created_at.asc(), Dossier.dossier_number)
     else:
         # Défaut : oldest_first (US-17 AC4 "du plus ancien au plus récent")
-        stmt = stmt.order_by(Dossier.created_at.asc())
+        stmt = stmt.order_by(Dossier.created_at.asc(), Dossier.dossier_number)
 
-    stmt = stmt.limit(limit)
+    stmt = stmt.offset(offset).limit(limit)
     rows = (await db.execute(stmt)).all()
+
+    # Total / récapitulatif sur TOUS les dossiers filtrés (pas seulement la page affichée)
+    n_distinct = func.count(func.distinct(Dossier.id))
+    total = (await db.execute(_scope(select(n_distinct)))).scalar_one()
+    by_status_rows = (await db.execute(
+        _scope(select(Dossier.status, n_distinct)).group_by(Dossier.status)
+    )).all()
+    pending = [DossierStatus.soumis, DossierStatus.en_validation, DossierStatus.complement_requis]
+    overdue_total = (await db.execute(
+        _scope(select(n_distinct)).where(Dossier.status.in_(pending), Dossier.created_at < overdue_cutoff)
+    )).scalar_one()
+    priority_total = (await db.execute(
+        _scope(select(n_distinct)).where(Dossier.priority_review.is_(True))
+    )).scalar_one()
 
     now = datetime.now(timezone.utc)
     items: list[DossierListItem] = []
@@ -159,7 +207,7 @@ async def list_dossiers(
             matricule=d.matricule,
             employeur_code=d.employeur_code,
             end_user_name=u.name,
-            end_user_contact=u.phone or u.telegram_id,
+            end_user_contact=u.phone or u.telegram_id or (u.extra or {}).get("telephone"),
             submitted_at=d.submitted_at,
             created_at=d.created_at,
             updated_at=d.updated_at,
@@ -170,24 +218,17 @@ async def list_dossiers(
             locked_at=d.locked_at if lock_info.get("locked") else None,
             age_hours=round(age_hours, 1) if age_hours is not None else None,
             is_overdue=is_overdue,
+            origine="import" if d.societaire_id else "inscription",
+            champs_manquants=champs_manquants(d, u),
+            champs_total=len(CHAMPS_REQUIS),
         ))
 
-    # Récap synthétique recalculé sur le résultat filtré (US-38 AC3)
-    by_status: dict[str, int] = {}
-    overdue_count = 0
-    priority_count = 0
-    for it in items:
-        by_status[it.status] = by_status.get(it.status, 0) + 1
-        if it.is_overdue:
-            overdue_count += 1
-        if it.priority_review:
-            priority_count += 1
-
+    # Récap synthétique recalculé sur le jeu filtré COMPLET (US-38 AC3), pas sur la page
     summary = {
-        "total": len(items),
-        "by_status": by_status,
-        "overdue_count": overdue_count,
-        "priority_count": priority_count,
+        "total": total,
+        "by_status": {st.value: n for st, n in by_status_rows},
+        "overdue_count": overdue_total,
+        "priority_count": priority_total,
     }
 
     filters_applied = {
@@ -203,10 +244,15 @@ async def list_dossiers(
         "until": until.isoformat() if until else None,
         "sort": sort,
         "limit": limit,
+        "offset": offset,
+        "q": q,
+        "origine": origine,
     }
 
     return DossierListResponse(
         items=items,
+        total=total,
+        offset=offset,
         summary=summary,
         filters_applied=filters_applied,
     )

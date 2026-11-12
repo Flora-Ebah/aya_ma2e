@@ -100,6 +100,26 @@ class _FakeResult:
     def all(self):
         return self._rows
 
+    def scalars(self):
+        return self
+
+
+# L'import crée aussi un dossier par sociétaire (page « Dossiers ») : on remplace la synchronisation
+# par un espion pour tester ICI l'import seul (la synchronisation a ses propres tests :
+# tests/test_societaire_dossiers.py).
+from app.services import societaire_dossiers as _sd  # noqa: E402
+
+SYNC_CALLS: list[int] = []
+
+
+async def _spy_sync(db, tenant_id, rows):
+    n = len(list(rows))
+    SYNC_CALLS.append(n)
+    return n, 0
+
+
+_sd.sync_dossiers = _spy_sync
+
 
 class _FakeDB:
     def __init__(self, existing_ids=()):
@@ -265,10 +285,18 @@ def test_import_logic() -> None:
             f"date illisible signalée en avertissement, ligne 7 : {rep.warnings}")
     _assert(db.rows_written() == 3, "les lignes valides sont écrites malgré les rejets")
 
-    # Simulation : compte mais n'écrit rien
+    # Simulation : compte mais n'écrit rien (ni sociétaire, ni dossier)
+    SYNC_CALLS.clear()
     db, rep = _run([_row(id_client="A"), _row(id_client="B")], existing={"A"}, dry_run=True)
     _assert((rep.accepted, rep.updated) == (1, 1), "simulation : comptes corrects")
     _assert(db.inserts == [], "simulation : AUCUNE écriture")
+    _assert(SYNC_CALLS == [] and rep.dossiers_created == 0, "simulation : AUCUN dossier créé")
+
+    # Import réel : les dossiers sont créés APRÈS l'écriture, et comptés dans le rapport
+    SYNC_CALLS.clear()
+    db, rep = _run([_row(id_client="A"), _row(id_client="B")], existing={"A"})
+    _assert(len(SYNC_CALLS) == 1, "import réel : synchronisation des dossiers lancée une fois")
+    _assert(rep.dossiers_created == SYNC_CALLS[0], "import réel : dossiers créés comptés dans le rapport")
 
     # Gros volume : écriture par lots
     n = BATCH_SIZE * 2 + 7

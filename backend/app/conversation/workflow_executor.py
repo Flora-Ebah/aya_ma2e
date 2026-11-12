@@ -1011,6 +1011,19 @@ async def _resolve_dynamic_router(
     return None
 
 
+async def _handoff_target_start(db: AsyncSession, current: Workflow, handoff_code: str) -> Optional[str]:
+    """`handoff_consultation` / `handoff_modification` / `handoff_chat` -> step de démarrage du parcours ACTIF
+    correspondant (autre que le parcours courant). None si aucun : le message du step handoff s'affiche alors."""
+    kind = handoff_code[len("handoff_"):]
+    rows = (await db.execute(
+        select(Workflow).where(Workflow.active.is_(True)).order_by(Workflow.position.asc(), Workflow.created_at.asc())
+    )).scalars().all()
+    for w in rows:
+        if w.id != current.id and w.start_step_code and _kind_from_name(w.name) == kind:
+            return w.start_step_code
+    return None
+
+
 # ----------------------------------------------------------------------
 # ENTRÉE PRINCIPALE
 # ----------------------------------------------------------------------
@@ -1202,6 +1215,20 @@ async def execute(
                 elif normalised in branches:
                     branch = normalised
                 next_code = _resolve_next_code(current, branch)
+
+            # Menu d'accueil statique (« 2 = Consulter », « 3 = Modifier »…) : la branche pointe vers un step
+            # `handoff_<parcours>` qui n'est qu'un message SANS suite -> la conversation se terminait et la
+            # réponse suivante (le matricule) relançait le menu. On bascule réellement vers le parcours cible.
+            if next_code and next_code.startswith("handoff_"):
+                switch = await _handoff_target_start(db, workflow, next_code)
+                if switch:
+                    return ExecuteResult(
+                        messages=out_messages,
+                        next_step_code=None,
+                        is_terminal=False,
+                        context=ctx,
+                        switch_to_step=switch,
+                    )
         else:
             # current n'est pas une question — on enchaîne depuis lui (cas exotique)
             # OU on vient de terminer un form WhatsApp → on avance au next_step_code

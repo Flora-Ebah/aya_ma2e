@@ -216,6 +216,12 @@ export const api = {
     until?: string;
     sort?: string;
     limit?: number;
+    /** Pagination côté serveur */
+    offset?: number;
+    /** Recherche : n° de dossier, matricule, nom, téléphone, e-mail */
+    q?: string;
+    /** import = base MA2E importée | inscription = dossiers du chatbot */
+    origine?: string;
   }) => {
     const params = new URLSearchParams();
     if (filters) {
@@ -425,7 +431,7 @@ export const api = {
     request(`/api/employeurs?include_inactive=${includeInactive}`),
   createEmployeur: (code: string, name: string) =>
     request("/api/employeurs", { method: "POST", body: JSON.stringify({ code, name }) }),
-  updateEmployeur: (id: string, payload: { name?: string; is_active?: boolean }) =>
+  updateEmployeur: (id: string, payload: { name?: string; is_active?: boolean; matricule_format?: string; matricule_exemple?: string }) =>
     request(`/api/employeurs/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteEmployeur: (id: string) =>
     request(`/api/employeurs/${id}`, { method: "DELETE" }),
@@ -452,6 +458,30 @@ export const api = {
     request(`/api/collaborateurs/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteCollaborateur: (id: string) =>
     request(`/api/collaborateurs/${id}`, { method: "DELETE" }),
+
+  /** Recherche paginée côté serveur : { items, total, page, page_size } */
+  searchCollaborateurs: (p: {
+    q?: string; employeur_code?: string; statut?: string; sort?: string; page?: number; page_size?: number;
+  }) => {
+    const qs = new URLSearchParams();
+    Object.entries(p).forEach(([k, v]) => { if (v !== undefined && v !== "") qs.set(k, String(v)); });
+    return request(`/api/collaborateurs/search?${qs.toString()}`);
+  },
+  /** Lien d'export CSV (mêmes filtres que la liste) — cookie d'authentification envoyé par le navigateur */
+  collaborateursExportUrl: (p: { q?: string; employeur_code?: string; statut?: string; sort?: string }): string => {
+    const base = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    const qs = new URLSearchParams();
+    Object.entries(p).forEach(([k, v]) => { if (v !== undefined && v !== "") qs.set(k, String(v)); });
+    return `${base}/api/collaborateurs/export.csv${qs.toString() ? "?" + qs : ""}`;
+  },
+  /** Historique des actions du référentiel (imports, exports, ajouts, modifications, retraits) */
+  historiqueCollaborateurs: (p: { page?: number; page_size?: number }) => {
+    const qs = new URLSearchParams();
+    Object.entries(p).forEach(([k, v]) => { if (v !== undefined) qs.set(k, String(v)); });
+    return request(`/api/collaborateurs/historique?${qs.toString()}`);
+  },
+  /** Chiffres du référentiel ERANOVE (total, par employeur, dernier import) et de la base MA2E importée */
+  collaborateursStats: () => request("/api/collaborateurs/stats"),
 
   // ============ Imports (US-37) ============
   listImportTargets: () => request("/api/imports/targets"),

@@ -53,6 +53,7 @@ export default function DossiersTable({
             <th scope="col">Dossier</th>
             <th scope="col">Sociétaire</th>
             <th scope="col">Statut</th>
+            <th scope="col" style={{ textAlign: "center" }}>Champs manquants</th>
             <th scope="col" className="hidden md:table-cell">Soumis le</th>
             <th scope="col" className="is-tight"><span className="sa-sr-only">Actions</span></th>
           </tr>
@@ -61,7 +62,7 @@ export default function DossiersTable({
           {loading ? (
             <SkeletonRows canSelect={canSelect} />
           ) : items.length === 0 ? (
-            <tr><td colSpan={canSelect ? 6 : 5}><Empty query={search} hasFilter={hasFilter} /></td></tr>
+            <tr><td colSpan={canSelect ? 7 : 6}><Empty query={search} hasFilter={hasFilter} /></td></tr>
           ) : (
             items.map((d) => (
               <DossierRow
@@ -79,6 +80,38 @@ export default function DossiersTable({
   );
 }
 
+/**
+ * Champs manquants : pastille dont la couleur suit la gravité (vert = complet, jaune 1-2, orange 3-4, rouge 5+)
+ * + « /total » en gris pour le contexte. La liste des champs manquants est dans l'infobulle.
+ */
+function MissingFields({ fields, total }: { fields?: string[]; total?: number }) {
+  if (!fields) return <span className="sa-cell-sub">—</span>;
+  const n = fields.length;
+  if (n === 0) return <span className="sa-badge sa-badge--ok" title="Tous les champs de la fiche sont renseignés">Complet</span>;
+  const tone =
+    n <= 2 ? { bg: "rgb(var(--color-status-warning-soft))", fg: "rgb(var(--color-status-warning))" }
+    : n <= 4 ? { bg: "rgb(234 122 26 / 0.16)", fg: "rgb(194 85 10)" }
+    : { bg: "rgb(var(--color-status-error) / 0.14)", fg: "rgb(var(--color-status-error))" };
+  return (
+    <span
+      title={`À compléter : ${fields.join(", ")}`}
+      aria-label={`${n} champ${n > 1 ? "s" : ""} manquant${n > 1 ? "s" : ""}${total ? ` sur ${total}` : ""}`}
+      style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+    >
+      <span
+        style={{
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          minWidth: 30, height: 30, padding: "0 8px", borderRadius: 999,
+          fontSize: 15, fontWeight: 700, lineHeight: 1, background: tone.bg, color: tone.fg,
+        }}
+      >
+        {n}
+      </span>
+      {!!total && <span style={{ fontSize: 13, lineHeight: 1, color: "rgb(var(--color-text-muted))" }}>/{total}</span>}
+    </span>
+  );
+}
+
 function SkeletonRows({ canSelect }: { canSelect?: boolean }) {
   return (
     <>
@@ -88,6 +121,7 @@ function SkeletonRows({ canSelect }: { canSelect?: boolean }) {
           <td><div className="sa-skeleton sa-skeleton--text" style={{ width: 120 }} /></td>
           <td><div className="sa-skeleton sa-skeleton--text" style={{ width: 160 }} /></td>
           <td><div className="sa-skeleton sa-skeleton--text" style={{ width: 90 }} /></td>
+          <td><div className="sa-skeleton sa-skeleton--text" style={{ width: 110 }} /></td>
           <td className="hidden md:table-cell"><div className="sa-skeleton sa-skeleton--text" style={{ width: 90 }} /></td>
           <td><div className="sa-skeleton sa-skeleton--btn" style={{ width: 80 }} /></td>
         </tr>
@@ -136,12 +170,20 @@ function DossierRow({
         )}
       </td>
       <td data-label="Statut"><StatusBadge status={d.status} /></td>
+      <td data-label="Champs manquants" style={{ textAlign: "center" }}><MissingFields fields={d.champs_manquants} total={d.champs_total} /></td>
       <td className="hidden md:table-cell" data-label="Soumis le">
-        <span className="sa-cell-sub" style={{ whiteSpace: "nowrap" }}>
-          {d.submitted_at
-            ? new Date(d.submitted_at).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })
-            : "—"}
-        </span>
+        {d.origine === "import" ? (
+          // Sociétaire importé : pas de soumission, on affiche sa date d'adhésion
+          <span className="sa-cell-sub" style={{ whiteSpace: "nowrap" }} title="Date d'adhésion">
+            {d.submitted_at ? `Adhésion ${new Date(d.submitted_at).toLocaleDateString("fr-FR")}` : "—"}
+          </span>
+        ) : (
+          <span className="sa-cell-sub" style={{ whiteSpace: "nowrap" }}>
+            {d.submitted_at
+              ? new Date(d.submitted_at).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })
+              : "—"}
+          </span>
+        )}
       </td>
       <td className="is-tight" data-label="Actions">
         <div className="sa-row" style={{ flexWrap: "nowrap", justifyContent: "flex-end", gap: 4 }}>
@@ -285,9 +327,15 @@ function RowMenu({ d, href, onDeleted }: { d: Dossier; href: string; onDeleted?:
 
 /** Indicateurs : priorité / retard / verrouillage — icône + texte, jamais coupés. */
 function DossierFlags({ d }: { d: Dossier }) {
-  if (!d.priority_review && !d.is_overdue && !d.locked) return null;
+  const imported = d.origine === "import";
+  if (!imported && !d.priority_review && !d.is_overdue && !d.locked) return null;
   return (
     <div className="sa-row" style={{ gap: 4, marginTop: 4 }}>
+      {imported && (
+        <span className="sa-badge sa-badge--neutral" title="Sociétaire importé de la base MA2E (fichier Perfect Vision)">
+          <Icon name="user-group" className="i" /> Base MA2E
+        </span>
+      )}
       {d.priority_review && (
         <span className="sa-badge sa-badge--warn" title={d.priority_reason ?? "À revoir en priorité"}>
           <Icon name="flag-01" className="i" /> Priorité
@@ -315,7 +363,7 @@ function Empty({ query, hasFilter }: { query: string; hasFilter: boolean }) {
     <div className="sa-empty">
       <Icon name="folder-01" className="i" />
       <div className="sa-empty__title">
-        {query ? "Aucun résultat" : hasFilter ? "Aucun dossier dans ce statut" : "Aucun dossier pour le moment"}
+        {query ? "Aucun résultat" : hasFilter ? "Aucun dossier pour ces filtres" : "Aucun dossier pour le moment"}
       </div>
       <p className="sa-empty__text">
         {query

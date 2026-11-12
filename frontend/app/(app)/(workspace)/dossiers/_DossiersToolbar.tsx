@@ -7,6 +7,8 @@ type Props = {
   onSearchChange: (v: string) => void;
   statusFilter: string;
   onStatusFilterChange: (v: string) => void;
+  origine: string;
+  onOrigineChange: (v: string) => void;
   advancedOpen: boolean;
   onToggleAdvanced: () => void;
   activeAdvancedCount: number;
@@ -17,7 +19,7 @@ type Props = {
  * « Plus de filtres » (avec compteur de filtres actifs).
  */
 export default function DossiersToolbar({
-  search, onSearchChange, statusFilter, onStatusFilterChange,
+  search, onSearchChange, statusFilter, onStatusFilterChange, origine, onOrigineChange,
   advancedOpen, onToggleAdvanced, activeAdvancedCount,
 }: Props) {
   return (
@@ -46,6 +48,18 @@ export default function DossiersToolbar({
             {f.key === "" ? "Tous les statuts" : f.label}
           </option>
         ))}
+      </select>
+
+      <select
+        className="sa-select"
+        style={{ flex: "0 1 200px", minWidth: 0 }}
+        value={origine}
+        onChange={(e) => onOrigineChange(e.target.value)}
+        aria-label="Filtrer par origine"
+      >
+        <option value="">Toutes les origines</option>
+        <option value="inscription">Inscriptions (chatbot)</option>
+        <option value="import">Base MA2E importée</option>
       </select>
 
       <button

@@ -1,7 +1,18 @@
 "use client";
+import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { Icon } from "@/components/Icon";
+import ListPagination from "@/app/(app)/(workspace)/dossiers/_ListPagination";
+
+/** Réponse de GET /api/collaborateurs/stats */
+type RefStats = {
+  total: number;
+  actifs: number;
+  par_employeur: { code: string; total: number }[];
+  dernier_import: { date: string; fichier: string | null; lignes: number | null } | null;
+  base_ma2e: { total: number; dernier_import: string | null };
+};
 
 /**
  * Référentiels fermés — listes de valeurs utilisées par les parcours IA.
@@ -45,6 +56,30 @@ type Societaire = {
 
 type Employeur = { code: string; name: string };
 
+const STATUT_LABELS: Record<string, string> = {
+  actif: "Actif", retraite: "Retraité", demission: "Démission", licencie: "Licencié", inactif: "Inactif",
+};
+const HIST_PAGE_SIZE = 25;
+
+/** Ligne de GET /api/collaborateurs/historique (textes déjà rédigés côté serveur) */
+type HistoriqueItem = {
+  id: string;
+  date: string;
+  type: string;
+  libelle: string;
+  detail: string;
+  auteur: string;
+};
+
+const HIST_TYPES: Record<string, { label: string; badge: string }> = {
+  import: { label: "Import", badge: "sa-badge--info" },
+  import_refuse: { label: "Import refusé", badge: "sa-badge--error" },
+  export: { label: "Export", badge: "sa-badge--neutral" },
+  ajout: { label: "Ajout", badge: "sa-badge--ok" },
+  modification: { label: "Modification", badge: "sa-badge--warn" },
+  retrait: { label: "Retrait", badge: "sa-badge--error" },
+};
+
 export default function ListesPage() {
   const [lists, setLists] = useState<RefList[]>([]);
   const [loading, setLoading] = useState(true);
@@ -52,7 +87,8 @@ export default function ListesPage() {
   const [editing, setEditing] = useState<RefList | null>(null);
   const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState<{ type: "success" | "error"; text: string } | null>(null);
-  const [societairesCount, setSocietairesCount] = useState<number | null>(null);
+  // Chiffres du référentiel ERANOVE ET de la base MA2E importée (ligne « Référentiel » ci-dessous)
+  const [refStats, setRefStats] = useState<RefStats | null>(null);
   const [societairesOpen, setSocietairesOpen] = useState(false);
 
   const reload = useCallback(async () => {
@@ -70,10 +106,9 @@ export default function ListesPage() {
 
   const reloadSocietairesCount = useCallback(async () => {
     try {
-      const rows = await api.listCollaborateurs({ limit: 1000 });
-      setSocietairesCount(rows.length);
+      setRefStats(await api.collaborateursStats());
     } catch {
-      setSocietairesCount(null);
+      setRefStats(null);
     }
   }, []);
 
@@ -161,7 +196,7 @@ export default function ListesPage() {
                 <tr style={{ background: "rgb(var(--color-brand-primary) / 0.04)" }}>
                   <td>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <strong>Sociétaires éligibles</strong>
+                      <strong>Référentiel des sociétaires ERANOVE</strong>
                       <span
                         className="sa-badge"
                         style={{
@@ -177,7 +212,7 @@ export default function ListesPage() {
                       </span>
                     </div>
                     <div style={{ fontSize: 12, color: "rgb(var(--color-text-muted))", marginTop: 2 }}>
-                      Référentiel des matricules du groupe ERANOVE — sert à vérifier qu&apos;un
+                      Liste des sociétaires du groupe ERANOVE — sert à vérifier qu&apos;un
                       candidat appartient bien au personnel.
                     </div>
                   </td>
@@ -185,15 +220,18 @@ export default function ListesPage() {
                     <code style={{ fontSize: 12 }}>societaires</code>
                   </td>
                   <td>
-                    <span style={{ fontSize: 13 }}>
-                      {societairesCount == null
-                        ? "—"
-                        : societairesCount === 0
-                          ? "Aucun fichier importé"
-                          : `${societairesCount} matricule(s) chargé(s)`}
-                    </span>
+                    {refStats == null ? (
+                      <span style={{ fontSize: 13 }}>—</span>
+                    ) : (
+                      <>
+                        <div style={{ fontSize: 13 }}>
+                          <strong>Référentiel ERANOVE :</strong>{" "}
+                          {refStats.total === 0 ? "aucun matricule chargé" : `${refStats.total.toLocaleString("fr-FR")} matricule${refStats.total > 1 ? "s" : ""}`}
+                        </div>
+                      </>
+                    )}
                     <div style={{ fontSize: 11, color: "rgb(var(--color-text-muted))", marginTop: 2 }}>
-                      Import CSV / XLSX
+                      Import CSV / XLSX (référentiel ou base MA2E)
                     </div>
                   </td>
                   <td>—</td>
@@ -333,6 +371,19 @@ function EditorModal({
   const [saving, setSaving] = useState(false);
   const firstInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Liste « Employeurs du groupe » : chaque employeur porte aussi son format de matricule
+  const isEmployeurs = initial?.key === "employeurs";
+  const [emps, setEmps] = useState<EmployeurFormat[]>([]);
+  const [fmts, setFmts] = useState<Record<string, { fmt: string; ex: string; test: string }>>({});
+  useEffect(() => {
+    if (!isEmployeurs) return;
+    api.listEmployeurs(true).then((data: EmployeurFormat[]) => {
+      setEmps(data);
+      setFmts(Object.fromEntries(data.map((e) => [e.code.toUpperCase(), { fmt: e.matricule_format ?? "", ex: e.matricule_exemple ?? "", test: "" }])));
+    }).catch(() => {});
+  }, [isEmployeurs]);
+  const empOf = (it: Item) => emps.find((e) => e.code.toUpperCase() === (it.code || it.label || "").trim().toUpperCase());
+
   useEffect(() => {
     firstInputRef.current?.focus();
   }, []);
@@ -367,6 +418,18 @@ function EditorModal({
 
     setSaving(true);
     try {
+      if (isEmployeurs) {
+        for (const e of emps) {
+          const d = fmts[e.code.toUpperCase()];
+          if (!d) continue;
+          if (d.fmt.trim() === (e.matricule_format ?? "") && d.ex.trim() === (e.matricule_exemple ?? "")) continue;
+          try {
+            await api.updateEmployeur(e.id, { matricule_format: d.fmt.trim(), matricule_exemple: d.ex.trim() });
+          } catch (err: any) {
+            throw new Error(`${e.code} : ${(err?.message ?? "format refusé").replace(/^\d+:\s*/, "")}`);
+          }
+        }
+      }
       if (isEdit && initial) {
         await api.updateReferenceList(initial.id, {
           label: label.trim(),
@@ -514,8 +577,8 @@ function EditorModal({
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {items.map((it, idx) => (
+                <div key={idx} style={{ display: "grid", gap: 6 }}>
                 <div
-                  key={idx}
                   style={{
                     display: "grid",
                     gridTemplateColumns: "1fr 1fr auto",
@@ -554,8 +617,43 @@ function EditorModal({
                     <Icon name="delete-02" className="i" />
                   </button>
                 </div>
+                {isEmployeurs && (() => {
+                  const e = empOf(it);
+                  if (!e) return null;
+                  const k = e.code.toUpperCase();
+                  const d = fmts[k] ?? { fmt: "", ex: "", test: "" };
+                  const set = (patch: Partial<typeof d>) => setFmts((p) => ({ ...p, [k]: { ...d, ...patch } }));
+                  const res = testFormat(d.fmt, d.test);
+                  return (
+                    <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.8fr 1fr", gap: 8, paddingLeft: 12,
+                      borderLeft: "2px solid rgb(var(--color-border-default))" }}>
+                      <input className="sa-input" value={d.fmt} maxLength={120} style={{ fontFamily: "monospace" }}
+                        placeholder="Format du matricule (ex. [A-Z]\d{4}) — vide = aucun contrôle"
+                        aria-label={`Format du matricule ${e.code}`} onChange={(ev) => set({ fmt: ev.target.value })} />
+                      <input className="sa-input" value={d.ex} maxLength={64} placeholder="Exemple (A1234)"
+                        aria-label={`Exemple de matricule ${e.code}`} onChange={(ev) => set({ ex: ev.target.value })} />
+                      <div>
+                        <input className="sa-input" value={d.test} placeholder="Tester un matricule"
+                          aria-label={`Tester un matricule ${e.code}`} onChange={(ev) => set({ test: ev.target.value })} />
+                        {res !== null && (
+                          <div style={{ fontSize: 12, marginTop: 2, color: res ? "rgb(var(--color-status-success))" : "rgb(var(--color-status-error))" }}>
+                            {res ? "✓ Valide" : "✗ Ne respecte pas le format"}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+                </div>
               ))}
             </div>
+            {isEmployeurs && (
+              <div style={{ fontSize: 12, color: "rgb(var(--color-text-muted))", marginTop: 8 }}>
+                Le format est une expression régulière appliquée au matricule en majuscules, sans espace ni tiret
+                (ex. <code>{"[A-Z]\\d{4}"}</code> = 1 lettre + 4 chiffres, <code>{"\\d{5,8}"}</code> = 5 à 8 chiffres). Il est contrôlé à
+                l&apos;inscription, à l&apos;ajout et à l&apos;import du référentiel.
+              </div>
+            )}
           </div>
         </div>
 
@@ -586,6 +684,23 @@ function EditorModal({
 }
 
 // -----------------------------------------------------------------------------
+// Règle « matricule à format variable » : un format par employeur, édité dans la liste « Employeurs du groupe ».
+// Le format est une expression régulière appliquée au matricule normalisé (majuscules, sans espace ni tiret).
+// -----------------------------------------------------------------------------
+
+type EmployeurFormat = { id: string; code: string; name: string; matricule_format?: string | null; matricule_exemple?: string | null };
+
+function testFormat(pattern: string, value: string): boolean | null {
+  if (!pattern.trim() || !value.trim()) return null;
+  try {
+    const norm = value.toUpperCase().replace(/[\s\-_./]/g, "");
+    return new RegExp(`^(?:${pattern.trim()})$`, "i").test(norm);
+  } catch {
+    return null;
+  }
+}
+
+// -----------------------------------------------------------------------------
 // SocietairesModal — gestion inline des sociétaires (fichier RH).
 // -----------------------------------------------------------------------------
 
@@ -598,47 +713,30 @@ function SocietairesModal({
   onChanged: () => void;
   notify: (msg: string, type: "success" | "error") => void;
 }) {
-  const [rows, setRows] = useState<Societaire[]>([]);
   const [employeurs, setEmployeurs] = useState<Employeur[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
+  // Historique : liste paginée des actions faites dans le référentiel (ajouts, modifications, retraits, imports, exports)
+  const [histItems, setHistItems] = useState<HistoriqueItem[]>([]);
+  const [histTotal, setHistTotal] = useState(0);
+  const [histPage, setHistPage] = useState(1);
+  const [histLoading, setHistLoading] = useState(false);
+  const [histVersion, setHistVersion] = useState(0); // incrémenté après chaque action pour recharger l'historique
+  const bumpHistory = () => setHistVersion((v) => v + 1);
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await api.listCollaborateurs({
-        search: search || undefined,
-        limit: 500,
-      });
-      setRows(data);
-    } catch (e: any) {
-      notify(e?.message ?? "Erreur de chargement.", "error");
-    } finally {
-      setLoading(false);
-    }
-  }, [search, notify]);
-
   useEffect(() => {
-    load();
-  }, [load]);
+    let alive = true;
+    setHistLoading(true);
+    api.historiqueCollaborateurs({ page: histPage, page_size: HIST_PAGE_SIZE })
+      .then((d: any) => { if (alive) { setHistItems(d.items); setHistTotal(d.total); } })
+      .catch((e: any) => notify(e?.message ?? "Erreur de chargement de l'historique.", "error"))
+      .finally(() => { if (alive) setHistLoading(false); });
+    return () => { alive = false; };
+  }, [histPage, histVersion, notify]);
 
   useEffect(() => {
     api.listEmployeurs(false).then(setEmployeurs).catch(() => {});
   }, []);
-
-  async function del(c: Societaire) {
-    if (!confirm(`Retirer ${c.prenoms} ${c.nom} (${c.matricule}) du fichier ?`)) return;
-    try {
-      await api.deleteCollaborateur(c.id);
-      notify("Sociétaire retiré.", "success");
-      await load();
-      onChanged();
-    } catch (e: any) {
-      notify(e?.message ?? "Erreur.", "error");
-    }
-  }
 
   return (
     <div
@@ -666,10 +764,10 @@ function SocietairesModal({
           style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}
         >
           <div>
-            <h2 className="sa-card__title">Sociétaires éligibles</h2>
+            <h2 className="sa-card__title">Référentiel des sociétaires ERANOVE</h2>
             <p className="sa-card__desc">
-              Fichier des matricules du groupe utilisé pour vérifier qu&apos;un candidat
-              appartient bien au personnel ERANOVE.
+              Liste des agents du groupe éligibles à MA2E, utilisée pour vérifier un matricule
+              lors de l&apos;inscription.
             </p>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
@@ -692,81 +790,55 @@ function SocietairesModal({
           </div>
         </div>
 
-        <div style={{ padding: "12px 0" }}>
-          <input
-            type="search"
-            className="sa-input"
-            placeholder="Rechercher par matricule, nom, email…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </div>
-
-        {loading ? (
-          <div style={{ padding: 24 }}>
-            <div className="sa-skeleton sa-skeleton--text" style={{ width: 320 }} />
+        <>
+          <div className="sa-pagination__info" style={{ paddingBottom: 8 }} aria-live="polite">
+            {histLoading ? "Chargement…" : `${histTotal.toLocaleString("fr-FR")} action${histTotal > 1 ? "s" : ""} enregistrée${histTotal > 1 ? "s" : ""}`}
           </div>
-        ) : rows.length === 0 ? (
-          <div className="sa-empty">
-            <Icon name="user-group" className="i" />
-            <div className="sa-empty__title">Aucun sociétaire</div>
-            <p className="sa-empty__text">
-              Importez un CSV depuis le SI RH ou ajoutez un matricule manuellement.
-            </p>
-          </div>
-        ) : (
-          <div className="sa-table-wrap" style={{ maxHeight: 400, overflowY: "auto" }}>
-            <table className="sa-table">
-              <thead>
-                <tr>
-                  <th>Matricule</th>
-                  <th>Nom / Prénoms</th>
-                  <th>Employeur</th>
-                  <th>Fonction</th>
-                  <th>Statut</th>
-                  <th style={{ width: 60 }}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((c) => (
-                  <tr key={c.id}>
-                    <td style={{ fontFamily: "monospace", whiteSpace: "nowrap" }}>
-                      {c.matricule}
-                    </td>
-                    <td>
-                      <div>
-                        {c.nom} {c.prenoms}
-                      </div>
-                      {c.email && (
-                        <div
-                          style={{
-                            fontSize: 11,
-                            color: "rgb(var(--color-text-muted))",
-                          }}
-                        >
-                          {c.email}
-                        </div>
-                      )}
-                    </td>
-                    <td>{c.employeur_code}</td>
-                    <td>{c.fonction || "—"}</td>
-                    <td>{c.statut}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="sa-btn sa-btn--ghost sa-btn--sm"
-                        onClick={() => del(c)}
-                        aria-label="Supprimer"
-                      >
-                        <Icon name="delete-02" className="i" />
-                      </button>
-                    </td>
+          {!histLoading && histItems.length === 0 ? (
+            <div className="sa-empty">
+              <Icon name="list-view" className="i" />
+              <div className="sa-empty__title">Aucune action enregistrée</div>
+              <p className="sa-empty__text">Les imports, exports, ajouts, modifications et retraits apparaîtront ici.</p>
+            </div>
+          ) : (
+            <div className="sa-table-wrap" style={{ maxHeight: 460, overflowY: "auto" }}>
+              <table className="sa-table" aria-busy={histLoading}>
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    <th>Action</th>
+                    <th>Détail</th>
+                    <th>Par</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                </thead>
+                <tbody>
+                  {histItems.map((h) => {
+                    const t = HIST_TYPES[h.type] ?? { label: h.type, badge: "sa-badge--neutral" };
+                    return (
+                      <tr key={h.id}>
+                        <td style={{ whiteSpace: "nowrap" }}>
+                          {new Date(h.date).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })}
+                        </td>
+                        <td>
+                          <span className={`sa-badge ${t.badge}`}>{t.label}</span>
+                          <div style={{ marginTop: 4 }}>{h.libelle}</div>
+                        </td>
+                        <td style={{ fontSize: 13 }}>{h.detail || "—"}</td>
+                        <td style={{ whiteSpace: "nowrap" }}>{h.auteur}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <ListPagination page={histPage} pageSize={HIST_PAGE_SIZE} total={histTotal} onPageChange={setHistPage} />
+          <p style={{ fontSize: 12, color: "rgb(var(--color-text-muted))", marginTop: 12 }}>
+            Les imports et les exports sont enregistrés depuis le début ; les ajouts, modifications et retraits
+            unitaires le sont depuis la mise en place de cet historique. Seuls le matricule et les champs modifiés
+            sont conservés, jamais les noms ni les coordonnées.
+          </p>
+        </>
 
         <div
           className="sa-card__footer"
@@ -784,7 +856,7 @@ function SocietairesModal({
           onClose={() => setAddOpen(false)}
           onDone={async () => {
             setAddOpen(false);
-            await load();
+            bumpHistory();
             onChanged();
           }}
           notify={notify}
@@ -795,7 +867,7 @@ function SocietairesModal({
           onClose={() => setImportOpen(false)}
           onDone={async () => {
             setImportOpen(false);
-            await load();
+            bumpHistory();
             onChanged();
           }}
           notify={notify}
@@ -807,39 +879,56 @@ function SocietairesModal({
 
 function AddSocietaireModal({
   employeurs,
+  initial,
   onClose,
   onDone,
   notify,
 }: {
   employeurs: Employeur[];
+  /** Renseigné = mode « modification » : matricule et employeur sont verrouillés (l'API ne les modifie pas) */
+  initial?: Societaire;
   onClose: () => void;
   onDone: () => void;
   notify: (msg: string, type: "success" | "error") => void;
 }) {
-  const [matricule, setMatricule] = useState("");
-  const [employeurCode, setEmployeurCode] = useState(employeurs[0]?.code ?? "");
-  const [nom, setNom] = useState("");
-  const [prenoms, setPrenoms] = useState("");
-  const [email, setEmail] = useState("");
-  const [telephone, setTelephone] = useState("");
-  const [fonction, setFonction] = useState("");
+  const edit = !!initial;
+  const [matricule, setMatricule] = useState(initial?.matricule ?? "");
+  const [employeurCode, setEmployeurCode] = useState(initial?.employeur_code ?? employeurs[0]?.code ?? "");
+  const [nom, setNom] = useState(initial?.nom ?? "");
+  const [prenoms, setPrenoms] = useState(initial?.prenoms ?? "");
+  const [email, setEmail] = useState(initial?.email ?? "");
+  const [telephone, setTelephone] = useState(initial?.telephone ?? "");
+  const [fonction, setFonction] = useState(initial?.fonction ?? "");
+  const [statut, setStatut] = useState(initial?.statut ?? "actif");
   const [submitting, setSubmitting] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     try {
-      await api.createCollaborateur({
-        matricule: matricule.trim().toUpperCase(),
-        employeur_code: employeurCode,
-        nom: nom.trim(),
-        prenoms: prenoms.trim(),
-        email: email.trim() || null,
-        telephone: telephone.trim() || null,
-        fonction: fonction.trim() || null,
-        statut: "actif",
-      });
-      notify("Sociétaire ajouté.", "success");
+      if (initial) {
+        await api.updateCollaborateur(initial.id, {
+          nom: nom.trim(),
+          prenoms: prenoms.trim(),
+          email: email.trim() || null,
+          telephone: telephone.trim() || null,
+          fonction: fonction.trim() || null,
+          statut,
+        });
+        notify("Matricule modifié.", "success");
+      } else {
+        await api.createCollaborateur({
+          matricule: matricule.trim().toUpperCase(),
+          employeur_code: employeurCode,
+          nom: nom.trim(),
+          prenoms: prenoms.trim(),
+          email: email.trim() || null,
+          telephone: telephone.trim() || null,
+          fonction: fonction.trim() || null,
+          statut,
+        });
+        notify("Sociétaire ajouté.", "success");
+      }
       onDone();
     } catch (e: any) {
       notify(e?.message?.replace(/^\d+:\s*/, "") ?? "Erreur.", "error");
@@ -870,7 +959,10 @@ function AddSocietaireModal({
         style={{ maxWidth: 560, width: "100%", margin: "32px auto" }}
       >
         <div className="sa-card__header">
-          <h2 className="sa-card__title">Ajouter un sociétaire</h2>
+          <h2 className="sa-card__title">{edit ? `Modifier le matricule ${initial!.matricule}` : "Ajouter un sociétaire"}</h2>
+          {edit && (
+            <p className="sa-card__desc">Le matricule et l&apos;employeur ne sont pas modifiables : retirez la ligne puis ajoutez-la de nouveau.</p>
+          )}
         </div>
         <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
@@ -879,6 +971,7 @@ function AddSocietaireModal({
               <input
                 className="sa-input"
                 required
+                disabled={edit}
                 value={matricule}
                 onChange={(e) => setMatricule(e.target.value)}
               />
@@ -890,7 +983,10 @@ function AddSocietaireModal({
                 value={employeurCode}
                 onChange={(e) => setEmployeurCode(e.target.value)}
                 required
+                disabled={edit}
               >
+                {/* en modification, l'employeur d'origine reste affiché même s'il n'est plus dans la liste active */}
+                {edit && !employeurs.some((e) => e.code === employeurCode) && <option value={employeurCode}>{employeurCode}</option>}
                 {employeurs.map((e) => (
                   <option key={e.code} value={e.code}>
                     {e.code} — {e.name}
@@ -938,13 +1034,21 @@ function AddSocietaireModal({
               />
             </div>
           </div>
-          <div>
-            <label className="sa-form-label">Fonction (optionnel)</label>
-            <input
-              className="sa-input"
-              value={fonction}
-              onChange={(e) => setFonction(e.target.value)}
-            />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div>
+              <label className="sa-form-label">Fonction (optionnel)</label>
+              <input
+                className="sa-input"
+                value={fonction}
+                onChange={(e) => setFonction(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="sa-form-label">Statut</label>
+              <select className="sa-input" value={statut} onChange={(e) => setStatut(e.target.value)}>
+                {Object.entries(STATUT_LABELS).map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+              </select>
+            </div>
           </div>
           <div
             style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 8 }}
@@ -953,7 +1057,7 @@ function AddSocietaireModal({
               Annuler
             </button>
             <button type="submit" className="sa-btn sa-btn--primary" disabled={submitting}>
-              {submitting ? "Enregistrement…" : "Ajouter"}
+              {submitting ? "Enregistrement…" : edit ? "Enregistrer" : "Ajouter"}
             </button>
           </div>
         </form>
@@ -978,7 +1082,7 @@ type ImportReportData = {
 // - « base »        → base des sociétaires MA2E (fichier source Perfect Vision : id_client,
 //                     num_manuel, nom_client…) → POST /api/imports/societaires. Analyse
 //                     (dry_run) puis confirmation ; ré-import = mise à jour, sans doublon.
-// - « referentiel » → référentiel des matricules ERANOVE (matricule, employeur_code, nom…)
+// - « referentiel » → référentiel des sociétaires ERANOVE (matricule, employeur_code, nom…)
 //                     → POST /api/imports/collaborateurs, transaction atomique.
 const IMPORT_KINDS: Record<ImportKind, { target: string; title: string; desc: string }> = {
   base: {
@@ -988,7 +1092,7 @@ const IMPORT_KINDS: Record<ImportKind, { target: string; title: string; desc: st
   },
   referentiel: {
     target: "collaborateurs",
-    title: "Référentiel des matricules ERANOVE",
+    title: "Référentiel des sociétaires ERANOVE",
     desc: "Liste des agents éligibles (matricule, employeur_code, nom, prenoms). Aucune ligne n'est insérée si une seule contient une erreur.",
   },
 };
@@ -1258,7 +1362,7 @@ function ImportSocietairesModal({
                 <Icon name="checkmark-circle-02" className="i" />
                 <span>
                   {isBase
-                    ? `${report.accepted} sociétaire(s) créé(s) et ${report.updated ?? 0} mis à jour dans la base MA2E (utilisée par « Consulter mon dossier » et « Modifier mes informations »).`
+                    ? `${report.accepted} sociétaire(s) créé(s) et ${report.updated ?? 0} mis à jour dans la base MA2E : ils apparaissent dans « Dossiers » (étiquette « Base MA2E ») et servent aux parcours « Consulter mon dossier » et « Modifier mes informations ».`
                     : `${report.accepted} matricule(s) importé(s) avec succès.`}
                 </span>
               </div>
@@ -1279,6 +1383,18 @@ function ImportSocietairesModal({
                     ? "Import en cours…"
                     : `Confirmer l'import (${report.accepted + (report.updated ?? 0)} ligne(s))`}
                 </button>
+              ) : isBase && written ? (
+                // Les sociétaires importés apparaissent dans la page « Dossiers » (et non dans
+                // « Sociétaires éligibles », qui liste le référentiel ERANOVE) : on y mène.
+                <>
+                  <button type="button" className="sa-btn sa-btn--ghost" onClick={onDone}>
+                    Fermer
+                  </button>
+                  <Link href="/dossiers?origine=import" className="sa-btn sa-btn--primary">
+                    <Icon name="user-group" className="i" />
+                    Voir les dossiers importés
+                  </Link>
+                </>
               ) : (
                 <button
                   type="button"

@@ -70,6 +70,11 @@ class DossierListItem(BaseModel):
     # US-17 règle "> 48h prioritaire" — affichable côté UI
     age_hours: Optional[float] = None
     is_overdue: bool = False  # > 48h soumis sans décision
+    # « import » = sociétaire de la base MA2E importée ; « inscription » = dossier créé via le chatbot
+    origine: str = "inscription"
+    # Libellés des champs de la fiche non renseignés (vide = dossier complet)
+    champs_manquants: list[str] = []
+    champs_total: int = 0  # nombre de champs requis (dénominateur de la barre de complétude)
 
     class Config:
         from_attributes = True
@@ -77,6 +82,8 @@ class DossierListItem(BaseModel):
 
 class DossierListResponse(BaseModel):
     items: list[DossierListItem]
+    total: int = 0   # nombre TOTAL de dossiers correspondant aux filtres (hors pagination)
+    offset: int = 0
     summary: dict  # KPI synthétiques recalculés en tête de liste (US-38 AC3)
     filters_applied: dict  # US-38 AC4 : reflet des filtres dans la réponse
 

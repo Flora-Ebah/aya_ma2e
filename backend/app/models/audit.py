@@ -38,6 +38,10 @@ class AuditAction(str, enum.Enum):
     user_mfa_verified = "user_mfa_verified"
     setting_changed = "setting_changed"
     template_changed = "template_changed"
+    # Référentiel des sociétaires ERANOVE (table collaborateurs) : actions faites une par une dans la fenêtre
+    referentiel_added = "referentiel_added"
+    referentiel_updated = "referentiel_updated"
+    referentiel_removed = "referentiel_removed"
 
 
 class AuditLog(Base):

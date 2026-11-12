@@ -20,6 +20,7 @@ from app.core.database import get_db
 from app.core.tenancy import AuthContext, get_auth_context
 from app.models import AuditAction, Dossier, Employeur, UserRole
 from app.services import audit_service
+from app.services.matricule_format import check_pattern
 
 router = APIRouter(prefix="/api/employeurs", tags=["employeurs"])
 
@@ -33,6 +34,8 @@ class EmployeurOut(BaseModel):
     code: str
     name: str
     is_active: bool
+    matricule_format: Optional[str] = None
+    matricule_exemple: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -45,6 +48,9 @@ class EmployeurCreateIn(BaseModel):
 class EmployeurUpdateIn(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     is_active: Optional[bool] = None
+    # Chaîne vide = supprimer la règle ; absent = inchangé
+    matricule_format: Optional[str] = Field(default=None, max_length=200)
+    matricule_exemple: Optional[str] = Field(default=None, max_length=64)
 
 
 # ====================================================================== #
@@ -163,6 +169,28 @@ async def update_employeur(
     if payload.is_active is not None and payload.is_active != employeur.is_active:
         changes["is_active"] = {"from": employeur.is_active, "to": payload.is_active}
         employeur.is_active = payload.is_active
+
+    fields_set = payload.model_fields_set
+    if "matricule_format" in fields_set and payload.matricule_format is not None:
+        try:
+            new_fmt = check_pattern(payload.matricule_format)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        if new_fmt != employeur.matricule_format:
+            changes["matricule_format"] = {"from": employeur.matricule_format, "to": new_fmt}
+            employeur.matricule_format = new_fmt
+    if "matricule_exemple" in fields_set and payload.matricule_exemple is not None:
+        new_ex = payload.matricule_exemple.strip() or None
+        if new_ex != employeur.matricule_exemple:
+            changes["matricule_exemple"] = {"from": employeur.matricule_exemple, "to": new_ex}
+            employeur.matricule_exemple = new_ex
+    if employeur.matricule_format:  # l'exemple donné doit respecter le format (sinon le message d'erreur serait faux)
+        from app.services.matricule_format import matches
+        if employeur.matricule_exemple and not matches(employeur.matricule_format, employeur.matricule_exemple):
+            raise HTTPException(
+                status_code=422,
+                detail=f"L'exemple « {employeur.matricule_exemple} » ne respecte pas le format saisi.",
+            )
 
     if changes:
         await db.flush()

@@ -333,5 +333,17 @@ async def import_societaires(
             },
         )
         await db.execute(stmt)
-    logger.info("Import sociétaires : %d créés, %d mis à jour, %d rejetés",
-                report.accepted, report.updated, report.rejected)
+    # Chaque sociétaire importé apparaît dans la page « Dossiers » (dossier « Validé » lié)
+    from app.services.societaire_dossiers import sync_dossiers
+    for k in range(0, len(ids), 5000):
+        rows_db = (await db.execute(
+            select(Societaire).where(
+                Societaire.tenant_id == tenant_id, Societaire.id_client.in_(ids[k:k + 5000])
+            )
+        )).scalars().all()
+        c, u = await sync_dossiers(db, tenant_id, rows_db)
+        report.dossiers_created += c
+        report.dossiers_updated += u
+    logger.info("Import sociétaires : %d créés, %d mis à jour, %d rejetés (dossiers : %d créés, %d mis à jour)",
+                report.accepted, report.updated, report.rejected,
+                report.dossiers_created, report.dossiers_updated)

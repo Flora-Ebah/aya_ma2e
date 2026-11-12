@@ -7,6 +7,10 @@ Retour : structures sérialisables JSON, dataclasses pour clarté.
 """
 from __future__ import annotations
 
+# NB : toutes les statistiques excluent les dossiers de la base MA2E importée
+# (`Dossier.societaire_id IS NULL`) : ce sont des adhésions historiques, pas de l'activité
+# d'identification (sinon l'import fausserait « créés », « validés » et les délais).
+
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -161,7 +165,7 @@ async def get_overview(
     by_status_rows = (
         await db.execute(
             select(Dossier.status, func.count(Dossier.id))
-            .where(Dossier.tenant_id == tenant_id)
+            .where(Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None))
             .group_by(Dossier.status)
         )
     ).all()
@@ -175,7 +179,7 @@ async def get_overview(
     total_period = (
         await db.execute(
             select(func.count(Dossier.id)).where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.created_at >= period_start,
             )
         )
@@ -189,7 +193,7 @@ async def get_overview(
                     func.extract("epoch", Dossier.validated_at - Dossier.submitted_at) / 3600.0
                 )
             ).where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.status == DossierStatus.valide,
                 Dossier.validated_at.is_not(None),
                 Dossier.submitted_at.is_not(None),
@@ -246,7 +250,7 @@ async def get_overview(
         prev_total_period = (
             await db.execute(
                 select(func.count(Dossier.id)).where(
-                    Dossier.tenant_id == tenant_id,
+                    Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                     Dossier.created_at >= prev_start,
                     Dossier.created_at < prev_end,
                 )
@@ -255,7 +259,7 @@ async def get_overview(
         prev_validated = (
             await db.execute(
                 select(func.count(Dossier.id)).where(
-                    Dossier.tenant_id == tenant_id,
+                    Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                     Dossier.status == DossierStatus.valide,
                     Dossier.validated_at >= prev_start,
                     Dossier.validated_at < prev_end,
@@ -265,7 +269,7 @@ async def get_overview(
         prev_rejected = (
             await db.execute(
                 select(func.count(Dossier.id)).where(
-                    Dossier.tenant_id == tenant_id,
+                    Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                     Dossier.status == DossierStatus.rejete,
                     Dossier.validated_at >= prev_start,
                     Dossier.validated_at < prev_end,
@@ -393,7 +397,7 @@ async def get_timeline(
                 func.count(Dossier.id).label("n"),
             )
             .where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.created_at >= period_start,
             )
             .group_by("day")
@@ -409,7 +413,7 @@ async def get_timeline(
                 func.count(Dossier.id).label("n"),
             )
             .where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.validated_at >= period_start,
                 Dossier.status == DossierStatus.valide,
             )
@@ -426,7 +430,7 @@ async def get_timeline(
                 func.count(Dossier.id).label("n"),
             )
             .where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.validated_at >= period_start,
                 Dossier.status == DossierStatus.rejete,
             )
@@ -504,7 +508,7 @@ async def get_rejection_reasons(
                 func.count(Dossier.id).label("n"),
             )
             .where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.status == DossierStatus.rejete,
                 Dossier.rejection_motive.is_not(None),
             )
@@ -549,7 +553,7 @@ async def get_agents_performance(
             .select_from(User)
             .join(Dossier, Dossier.validated_by == User.id)
             .where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.validated_at >= period_start,
             )
             .group_by(User.id, User.name)
@@ -638,7 +642,7 @@ async def get_conversion_funnel(
     created = (
         await db.execute(
             select(func.count(Dossier.id)).where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.created_at >= period_start,
             )
         )
@@ -647,7 +651,7 @@ async def get_conversion_funnel(
     submitted = (
         await db.execute(
             select(func.count(Dossier.id)).where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.created_at >= period_start,
                 Dossier.submitted_at.is_not(None),
             )
@@ -657,7 +661,7 @@ async def get_conversion_funnel(
     validated = (
         await db.execute(
             select(func.count(Dossier.id)).where(
-                Dossier.tenant_id == tenant_id,
+                Dossier.tenant_id == tenant_id, Dossier.societaire_id.is_(None),
                 Dossier.created_at >= period_start,
                 Dossier.status == DossierStatus.valide,
             )

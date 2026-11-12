@@ -260,6 +260,11 @@ def generate_fiche_pdf(
     parts = full_name.split()
     nom = parts[-1] if parts else ""
     prenoms = " ".join(parts[:-1]) if len(parts) > 1 else ""
+    # Dossier importé de la base MA2E : nom et prénoms sont stockés séparément
+    # (un nom composé « KONE TRAORE » ne se déduit pas de « PRENOM KONE TRAORE »).
+    eu_extra = (end_user.extra or {}) if end_user else {}
+    if eu_extra.get("nom"):
+        nom, prenoms = str(eu_extra["nom"]), str(eu_extra.get("prenoms") or "")
 
     # Repli sur l'OCR de la pièce quand l'usager n'a pas saisi son identité
     ocr = _ocr_fields(dossier)
@@ -294,8 +299,8 @@ def generate_fiche_pdf(
         "num_piece":       extra.get("numero_piece") or ocr.get("numero_piece") or "",
         "domicile":        extra.get("domicile") or extra.get("adresse_domicile", ""),
         "boite_postale":   extra.get("boite_postale_choisie") or extra.get("boite_postale", ""),
-        "telephone":       (end_user.phone if end_user else "") or "",
-        "email":           ((end_user.extra or {}).get("email") if end_user else "") or "",
+        "telephone":       ((end_user.phone if end_user else "") or eu_extra.get("telephone") or ""),
+        "email":           eu_extra.get("email") or "",
         "situation_geo":   extra.get("situation_geographique", ""),
         "distance_agence": extra.get("distance_agence", ""),
         "profession":      (donnees.fonction if donnees else "") or "",
@@ -314,9 +319,11 @@ def generate_fiche_pdf(
 
         "cat_val":         extra.get("categorie", ""),
         "emp_val":         dossier.employeur_code or "",
-        "cons_val":        "OUI" if any(
+        # Consentement : enregistré dans le parcours (3 portes ARTCI) OU reçu avant l'import
+        # (colonne « CONSENTEMENT RECU » du fichier source, déclaré par le sociétaire via le chat)
+        "cons_val":        "OUI" if (extra.get("consentement_recu") is True or any(
             c.decision.value == "accepte" for c in (dossier.consentements or [])
-        ) else "",
+        )) else "",
         "mere_val":        extra.get("nom_mere", ""),
     }
 

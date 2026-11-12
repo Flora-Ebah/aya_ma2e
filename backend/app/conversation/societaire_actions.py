@@ -15,7 +15,7 @@ import logging
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.conversation.workflow_actions import ActionResult, workflow_action
@@ -58,6 +58,10 @@ async def find_societaires(
     conds = [Societaire.id_client == raw_id, Societaire.code_client == raw_id]
     if mat:
         conds.append(Societaire.matricule_norm == mat)
+        # Matricule purement numérique : « 6 », « 06 » et « 00006 » désignent le même agent (zéros de tête variables).
+        # Plusieurs correspondances -> branche « ambiguous » : on ne devine jamais.
+        if mat.isdigit() and mat.lstrip("0"):
+            conds.append(func.ltrim(Societaire.matricule_norm, "0") == mat.lstrip("0"))
     if cni:
         conds.append(Societaire.cni_norm == cni)
 
@@ -349,5 +353,12 @@ async def apply_societaire_update(
         resource_id=str(s.id), actor_type="end_user", details=details,
     )
     await db.flush()
+    # Le dossier affiché dans la page « Dossiers » suit la modification (sans jamais bloquer le chat)
+    try:
+        from app.services.societaire_dossiers import sync_dossiers
+        async with db.begin_nested():
+            await sync_dossiers(db, tenant_id, [s])
+    except Exception:
+        logger.exception("sync dossier après mise à jour chat : échec (société %s)", s.id)
     # Formulation neutre : la plupart des libellés sont féminins (Catégorie, Fonction…)
     return ActionResult(branch_key=None, message=f"✅ *{f['label']}* : nouvelle valeur enregistrée.")

@@ -61,6 +61,13 @@ class Dossier(Base):
     # réutilisable. Format : MEMB-AAAA-NNNNNN (ex. MEMB-2026-000042).
     numero_societaire: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, unique=True)
 
+    # Dossier créé automatiquement pour un sociétaire de la base MA2E importée (fichier
+    # source Perfect Vision) : lien 1-1 vers `societaires`. NULL = dossier d'inscription
+    # normal (chatbot). La table `societaires` reste la source de vérité des données.
+    societaire_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("societaires.id", ondelete="SET NULL"), nullable=True, unique=True
+    )
+
     # Soft-lock coopératif (US-17 AC3) : un dossier ne peut être traité que par
     # un seul agent à la fois. Lock automatique à l'ouverture, TTL configurable.
     locked_by: Mapped[Optional[uuid.UUID]] = mapped_column(
@@ -176,4 +183,7 @@ class Employeur(Base):
     code: Mapped[str] = mapped_column(String(32), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     boite_postale: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Règle « matricule à format variable » : expression régulière sur le matricule normalisé + exemple affiché
+    matricule_format: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    matricule_exemple: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)

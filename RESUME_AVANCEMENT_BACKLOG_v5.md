@@ -1,6 +1,6 @@
 # MA2E — Point d'avancement backlog v5 (09/11/2026)
 
-Les tâches 01 à 05 du backlog v5 sont livrées dans `aya_ma2e-main` et testées ; 06 et 07 restent à faire.
+Les tâches 01 à 06 du backlog v5 sont livrées dans `aya_ma2e-main` et testées ; 07 reste à faire.
 **Rien n'est encore commité** (le dossier n'est pas un dépôt git).
 
 ## Fait
@@ -42,9 +42,17 @@ Les scripts sont rejouables et n'écrasent pas un message personnalisé dans le 
 - **Consentement** (choix 12) : OUI/NON + audit, pas le texte ARTCI versionné de l'inscription.
 - **Parcours d'inscription** : non modifié. Le seed local est une version réduite ; la version complète (Q1–Q23) n'existe qu'en base, pas dans le dépôt.
 
+## Tâche 06 — matricule à format variable
+
+- Chaque employeur peut avoir un **format de matricule** (expression régulière + exemple), géré dans *Listes de valeurs → Employeurs du groupe → Éditer* (sous chaque employeur : format, exemple et champ de test). Colonnes `employeurs.matricule_format` / `matricule_exemple`, créées au démarrage (`bootstrap`).
+- Le format s'applique au matricule **normalisé** (majuscules, sans espace/tiret) et doit correspondre en entier. Sans format : aucun contrôle (comportement d'avant).
+- Appliqué : ajout unitaire au référentiel (422), import CSV/XLSX du référentiel (ligne rejetée avec message), chat d'inscription (matricule absent du référentiel et ne respectant aucun format → on redemande, avec des exemples).
+- Consultation / mise à jour : un matricule numérique est retrouvé malgré les zéros de tête (`6` = `06` = `00006`) ; en cas de doublon la réponse « ambigu » est conservée.
+- Format refusé à l'enregistrement s'il est invalide, trop long ou à risque (quantificateurs imbriqués) ; l'exemple doit respecter le format.
+- Non fait : la règle n'est pas appliquée à l'import de la base MA2E (Perfect Vision) ni à la modification d'un matricule existant.
+
 ## Reste à faire
 
-- **06** — matricule à format variable (ex. `00006` vs `6`).
 - **07** — WhatsApp sur le nouveau numéro (+225 07 87 84 14 07) ; nécessite MinIO pour les photos.
 - MinIO non installé en local : photo / signature de la fiche et téléversement des pièces non testés.
 - Ayants droit (jusqu'à 4 avec contacts) : nécessite une table dédiée.
