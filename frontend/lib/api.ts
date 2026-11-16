@@ -431,7 +431,7 @@ export const api = {
     request(`/api/employeurs?include_inactive=${includeInactive}`),
   createEmployeur: (code: string, name: string) =>
     request("/api/employeurs", { method: "POST", body: JSON.stringify({ code, name }) }),
-  updateEmployeur: (id: string, payload: { name?: string; is_active?: boolean; matricule_format?: string; matricule_exemple?: string }) =>
+  updateEmployeur: (id: string, payload: { name?: string; is_active?: boolean }) =>
     request(`/api/employeurs/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteEmployeur: (id: string) =>
     request(`/api/employeurs/${id}`, { method: "DELETE" }),
@@ -698,8 +698,11 @@ export const api = {
       label: string;
       description: string | null;
       aliases: string[];
-      items: Array<{ code?: string | null; label: string; synonyms?: string[] }>;
+      items: Array<{ code?: string | null; label: string; synonyms?: string[]; added_at?: string }>;
       allow_other: boolean;
+      // « Employeurs du groupe » : longueur des matricules commune au groupe (null = pas de limite)
+      matricule_min_len: number | null;
+      matricule_max_len: number | null;
     }>,
   ) =>
     request(`/api/reference-lists/${id}`, {

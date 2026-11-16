@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -102,6 +103,8 @@ SYSTEM_LISTS: List[Dict[str, Any]] = [
         "aliases": ["employeur", "societe", "entreprise", "filiale"],
         "description": "Sociétés du groupe ERANOVE éligibles à MA2E.",
         "allow_other": False,
+        # Ordre d'AJOUT (le 1er = le plus ancien) ; la liste est affichée du plus récent au plus ancien
+        # une fois datée par ensure_employeurs_chronology.
         "items": [
             {"code": "gs2e", "label": "GS2E", "synonyms": []},
             {"code": "cie", "label": "CIE", "synonyms": ["compagnie ivoirienne d'electricite"]},
@@ -109,6 +112,7 @@ SYSTEM_LISTS: List[Dict[str, Any]] = [
             {"code": "eranove", "label": "ERANOVE", "synonyms": []},
             {"code": "smb", "label": "SMB", "synonyms": []},
             {"code": "sde", "label": "SDE", "synonyms": []},
+            {"code": "ciprel", "label": "CIPREL", "synonyms": []},
         ],
     },
     {
@@ -244,12 +248,20 @@ async def update_list(
     aliases: Optional[List[str]] = None,
     description: Optional[str] = None,
     allow_other: Optional[bool] = None,
+    matricule_rule: Optional[Dict[str, Optional[int]]] = None,
+    actor_id: Optional[UUID] = None,
 ) -> ReferenceList:
     rl = await get_list(db, tenant_id, list_id)
+    if matricule_rule is not None:
+        await _apply_matricule_rule(db, tenant_id, rl, matricule_rule, actor_id)
     if label is not None:
         rl.label = label.strip()
     if items is not None:
-        rl.items = _normalize_items(items)
+        new_items = _normalize_items(items)
+        if rl.key == EMPLOYEURS_KEY:
+            new_items = sort_by_added_at(stamp_new_items(new_items))
+            await sync_employeurs(db, tenant_id, list(rl.items or []), new_items)
+        rl.items = new_items
     if aliases is not None:
         rl.aliases = list(aliases)
     if description is not None:
@@ -303,8 +315,128 @@ def _normalize_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if isinstance(syns_raw, str):
             syns_raw = [s.strip() for s in syns_raw.split(",")]
         synonyms = [str(s).strip() for s in syns_raw if str(s).strip()]
-        out.append({"code": code, "label": label, "synonyms": synonyms})
+        item = {"code": code, "label": label, "synonyms": synonyms}
+        if raw.get("added_at"):  # date d'ajout (liste « Employeurs du groupe ») : conservée telle quelle
+            item["added_at"] = str(raw["added_at"])
+        out.append(item)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Liste « Employeurs du groupe » : ordre chronologique + lien avec la table `employeurs`
+# ---------------------------------------------------------------------------
+
+EMPLOYEURS_KEY = "employeurs"
+
+
+async def _apply_matricule_rule(
+    db: AsyncSession, tenant_id: UUID, rl: ReferenceList,
+    changes: Dict[str, Optional[int]], actor_id: Optional[UUID],
+) -> None:
+    """Longueur des matricules commune au groupe (min / max), portée par la liste « Employeurs du groupe »."""
+    from app.services.matricule_format import check_rule
+
+    if rl.key != EMPLOYEURS_KEY:
+        raise HTTPException(400, "La longueur des matricules ne se règle que sur la liste « Employeurs du groupe ».")
+    cfg = dict(rl.config or {})
+    new = {k: changes.get(k, cfg.get(k)) for k in ("matricule_min_len", "matricule_max_len")}
+    try:
+        check_rule(new["matricule_min_len"], new["matricule_max_len"])
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    before = {k: cfg.get(k) for k in new}
+    if before == new:
+        return
+    for k, v in new.items():
+        if v is None:
+            cfg.pop(k, None)
+        else:
+            cfg[k] = v
+    rl.config = cfg
+    from app.models import AuditAction
+    from app.services import audit_service
+    await audit_service.log(
+        db, tenant_id=tenant_id, action=AuditAction.setting_changed,
+        resource_type="reference_list", resource_id=str(rl.id),
+        actor_type="user" if actor_id else "system", actor_id=str(actor_id) if actor_id else None,
+        details={"action": "longueur_matricule", "from": before, "to": new},
+    )
+
+
+def stamp_new_items(items: List[Dict[str, Any]], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Donne une date d'ajout aux items qui n'en ont pas (items ajoutés lors de cet enregistrement)."""
+    stamp = (now or datetime.now(timezone.utc)).isoformat()
+    return [it if it.get("added_at") else {**it, "added_at": stamp} for it in items]
+
+
+def sort_by_added_at(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Plus récent en haut, plus ancien en bas. Tri stable : à date égale, l'ordre saisi est gardé."""
+    return sorted(items, key=lambda it: str(it.get("added_at") or ""), reverse=True)
+
+
+async def sync_employeurs(
+    db: AsyncSession, tenant_id: UUID, old_items: List[Dict[str, Any]], new_items: List[Dict[str, Any]]
+) -> None:
+    """Chaque employeur de la liste existe dans la table `employeurs` (qui porte sa règle de matricule) :
+    - ajouté à la liste  -> créé (ou réactivé) dans la table ;
+    - retiré de la liste -> DÉSACTIVÉ (jamais supprimé : des dossiers peuvent y être rattachés).
+    Les employeurs de la table absents de la liste avant ce changement ne sont pas touchés."""
+    from sqlalchemy import func
+
+    from app.models import Employeur
+
+    rows = {
+        e.code.upper(): e
+        for e in (await db.execute(select(Employeur).where(Employeur.tenant_id == tenant_id))).scalars()
+    }
+    names = {e.name.strip().lower() for e in rows.values()}
+    new_codes = set()
+    for it in new_items:
+        code = str(it["code"]).upper()[:32]
+        new_codes.add(code)
+        emp = rows.get(code)
+        if emp is None:
+            name = it["label"][:255]
+            if name.strip().lower() in names:  # nom déjà pris par un autre code
+                name = f"{name} ({code})"[:255]
+            emp = Employeur(tenant_id=tenant_id, code=code, name=name, is_active=True)
+            db.add(emp)
+            rows[code] = emp
+            names.add(name.strip().lower())
+        elif not emp.is_active:
+            emp.is_active = True
+    for it in old_items:
+        code = str(it.get("code") or "").upper()[:32]
+        if code and code not in new_codes and code in rows:
+            rows[code].is_active = False
+    await db.flush()
+
+
+async def ensure_employeurs_chronology(db: AsyncSession, tenant_id: UUID) -> bool:
+    """Migration unique : date d'ajout pour les items existants (l'ordre enregistré = ordre d'ajout,
+    le 1er étant le plus ancien), ajout de CIPREL, tri du plus récent au plus ancien.
+    Ne fait rien dès que tous les items ont une date. Retourne True si la liste a été modifiée."""
+    rl = await get_list_by_key(db, tenant_id, EMPLOYEURS_KEY)
+    if rl is None:
+        return False
+    items = list(rl.items or [])
+    if items and all(it.get("added_at") for it in items):
+        return False
+    base = rl.created_at or datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    dated = [
+        it if it.get("added_at") else {**it, "added_at": (base + timedelta(seconds=i)).isoformat()}
+        for i, it in enumerate(items)
+    ]
+    if not any(str(it.get("code", "")).lower() == "ciprel" for it in dated):
+        dated.append({"code": "ciprel", "label": "CIPREL", "synonyms": [],
+                      "added_at": datetime.now(timezone.utc).isoformat()})
+    dated = sort_by_added_at(dated)
+    await sync_employeurs(db, tenant_id, items, dated)
+    rl.items = dated
+    await db.commit()
+    return True
 
 
 def _norm_text(s: str) -> str:

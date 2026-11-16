@@ -265,6 +265,11 @@ async def import_societaires(
                 "Vérifiez qu'il s'agit bien du fichier source MA2E."
             )
 
+    # Longueur des matricules (intervalle commun au groupe) : un écart est SIGNALÉ (avertissement) sans
+    # bloquer la ligne — la base MA2E est la source de vérité, on ne perd pas un sociétaire existant.
+    from app.services.matricule_format import load_rule, validate as validate_matricule
+    mat_rule = await load_rule(db, tenant_id)
+
     cleaned: list[dict] = []
     seen: set[str] = set()
     for i, row in enumerate(rows, start=2):  # ligne 1 = en-têtes
@@ -280,6 +285,10 @@ async def import_societaires(
             continue
         seen.add(data["id_client"])
         cleaned.append(data)
+        if data.get("matricule"):
+            msg = validate_matricule(data["matricule"], mat_rule)
+            if msg:
+                row_warnings.append(msg + " Sociétaire importé quand même, matricule à vérifier.")
         for w in row_warnings:  # ligne importée, mais une valeur est à vérifier
             report.warnings.append({"line": i, "id_client": data["id_client"], "warning": w})
 

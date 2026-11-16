@@ -63,6 +63,9 @@ class ReferenceList(Base):
     allow_other: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # Réglages propres à une liste. « Employeurs du groupe » : longueur des matricules commune
+    # à toutes les entités du groupe — {"matricule_min_len": 3, "matricule_max_len": 5}.
+    config: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}", nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

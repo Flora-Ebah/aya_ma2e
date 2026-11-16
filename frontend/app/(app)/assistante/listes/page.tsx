@@ -27,7 +27,7 @@ type RefStats = {
  * pour la vérification matricule lors de l'inscription.
  */
 
-type Item = { code?: string | null; label: string; synonyms?: string[] };
+type Item = { code?: string | null; label: string; synonyms?: string[]; added_at?: string | null };
 
 type RefList = {
   id: string;
@@ -38,6 +38,8 @@ type RefList = {
   items: Item[];
   is_system: boolean;
   allow_other: boolean;
+  // « Employeurs du groupe » : longueur des matricules commune au groupe
+  config?: { matricule_min_len?: number | null; matricule_max_len?: number | null };
   created_at: string;
   updated_at: string;
 };
@@ -371,18 +373,12 @@ function EditorModal({
   const [saving, setSaving] = useState(false);
   const firstInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Liste « Employeurs du groupe » : chaque employeur porte aussi son format de matricule
+  // Liste « Employeurs du groupe » : longueur des matricules COMMUNE à toutes les entités du groupe
+  // (min / max, au-dessus de la liste). Employeurs du plus récent (en haut) au plus ancien (en bas).
   const isEmployeurs = initial?.key === "employeurs";
-  const [emps, setEmps] = useState<EmployeurFormat[]>([]);
-  const [fmts, setFmts] = useState<Record<string, { fmt: string; ex: string; test: string }>>({});
-  useEffect(() => {
-    if (!isEmployeurs) return;
-    api.listEmployeurs(true).then((data: EmployeurFormat[]) => {
-      setEmps(data);
-      setFmts(Object.fromEntries(data.map((e) => [e.code.toUpperCase(), { fmt: e.matricule_format ?? "", ex: e.matricule_exemple ?? "", test: "" }])));
-    }).catch(() => {});
-  }, [isEmployeurs]);
-  const empOf = (it: Item) => emps.find((e) => e.code.toUpperCase() === (it.code || it.label || "").trim().toUpperCase());
+  const [matMin, setMatMin] = useState<string>(initial?.config?.matricule_min_len ? String(initial.config.matricule_min_len) : "");
+  const [matMax, setMatMax] = useState<string>(initial?.config?.matricule_max_len ? String(initial.config.matricule_max_len) : "");
+  const lengthProblem = isEmployeurs ? matriculeLengthProblem(matMin, matMax) : null;
 
   useEffect(() => {
     firstInputRef.current?.focus();
@@ -392,7 +388,8 @@ function EditorModal({
     setItems((prev) => prev.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
   }
   function addItem() {
-    setItems((prev) => [...prev, { label: "", synonyms: [] }]);
+    // Employeurs : le nouvel employeur s'ajoute EN HAUT (le plus récent) ; autres listes : en bas
+    setItems((prev) => (isEmployeurs ? [{ label: "", synonyms: [] }, ...prev] : [...prev, { label: "", synonyms: [] }]));
   }
   function removeItem(i: number) {
     setItems((prev) => prev.filter((_, idx) => idx !== i));
@@ -404,6 +401,7 @@ function EditorModal({
         code: it.code || undefined,
         label: (it.label || "").trim(),
         synonyms: (it.synonyms || []).filter((s) => s.trim().length > 0),
+        added_at: it.added_at || undefined,
       }))
       .filter((it) => it.label);
 
@@ -416,27 +414,21 @@ function EditorModal({
       .map((s) => s.trim())
       .filter(Boolean);
 
+    if (lengthProblem) return onError(lengthProblem);
+
     setSaving(true);
     try {
-      if (isEmployeurs) {
-        for (const e of emps) {
-          const d = fmts[e.code.toUpperCase()];
-          if (!d) continue;
-          if (d.fmt.trim() === (e.matricule_format ?? "") && d.ex.trim() === (e.matricule_exemple ?? "")) continue;
-          try {
-            await api.updateEmployeur(e.id, { matricule_format: d.fmt.trim(), matricule_exemple: d.ex.trim() });
-          } catch (err: any) {
-            throw new Error(`${e.code} : ${(err?.message ?? "format refusé").replace(/^\d+:\s*/, "")}`);
-          }
-        }
-      }
       if (isEdit && initial) {
+        // Une seule requête : liste ET longueur des matricules enregistrées ensemble (ou pas du tout)
         await api.updateReferenceList(initial.id, {
           label: label.trim(),
           description: description.trim() || null,
           aliases: parsedAliases,
           items: cleanedItems,
           allow_other: allowOther,
+          ...(isEmployeurs
+            ? { matricule_min_len: matMin.trim() ? Number(matMin) : null, matricule_max_len: matMax.trim() ? Number(matMax) : null }
+            : {}),
         });
         onSaved("Liste mise à jour.");
       } else {
@@ -554,6 +546,31 @@ function EditorModal({
             </label>
           </div>
 
+          {isEmployeurs && (
+            <div className="sa-form-row">
+              <label className="sa-form-label">Longueur des matricules (toutes les entités du groupe)</label>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, fontSize: 14 }}>
+                entre
+                <input className="sa-input" type="number" min={1} max={64} value={matMin} placeholder="min"
+                  style={{ width: 84 }} aria-label="Nombre minimum de caractères du matricule"
+                  onChange={(ev) => setMatMin(ev.target.value)} />
+                et
+                <input className="sa-input" type="number" min={1} max={64} value={matMax} placeholder="max"
+                  style={{ width: 84 }} aria-label="Nombre maximum de caractères du matricule"
+                  onChange={(ev) => setMatMax(ev.target.value)} />
+                caractères
+              </div>
+              <div style={{ fontSize: 12, marginTop: 4,
+                color: lengthProblem ? "rgb(var(--color-status-error))" : "rgb(var(--color-text-muted))" }}>
+                {lengthProblem ?? (
+                  matMin.trim() || matMax.trim()
+                    ? "Matricules alphanumériques ou numériques, comptés en majuscules sans espace ni tiret (zéros de tête compris). Contrôlé à l'inscription, à l'ajout et à l'import du référentiel."
+                    : "Aucune limite : tout matricule est accepté."
+                )}
+              </div>
+            </div>
+          )}
+
           <div>
             <div
               style={{
@@ -617,41 +634,12 @@ function EditorModal({
                     <Icon name="delete-02" className="i" />
                   </button>
                 </div>
-                {isEmployeurs && (() => {
-                  const e = empOf(it);
-                  if (!e) return null;
-                  const k = e.code.toUpperCase();
-                  const d = fmts[k] ?? { fmt: "", ex: "", test: "" };
-                  const set = (patch: Partial<typeof d>) => setFmts((p) => ({ ...p, [k]: { ...d, ...patch } }));
-                  const res = testFormat(d.fmt, d.test);
-                  return (
-                    <div style={{ display: "grid", gridTemplateColumns: "1.4fr 0.8fr 1fr", gap: 8, paddingLeft: 12,
-                      borderLeft: "2px solid rgb(var(--color-border-default))" }}>
-                      <input className="sa-input" value={d.fmt} maxLength={120} style={{ fontFamily: "monospace" }}
-                        placeholder="Format du matricule (ex. [A-Z]\d{4}) — vide = aucun contrôle"
-                        aria-label={`Format du matricule ${e.code}`} onChange={(ev) => set({ fmt: ev.target.value })} />
-                      <input className="sa-input" value={d.ex} maxLength={64} placeholder="Exemple (A1234)"
-                        aria-label={`Exemple de matricule ${e.code}`} onChange={(ev) => set({ ex: ev.target.value })} />
-                      <div>
-                        <input className="sa-input" value={d.test} placeholder="Tester un matricule"
-                          aria-label={`Tester un matricule ${e.code}`} onChange={(ev) => set({ test: ev.target.value })} />
-                        {res !== null && (
-                          <div style={{ fontSize: 12, marginTop: 2, color: res ? "rgb(var(--color-status-success))" : "rgb(var(--color-status-error))" }}>
-                            {res ? "✓ Valide" : "✗ Ne respecte pas le format"}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })()}
                 </div>
               ))}
             </div>
             {isEmployeurs && (
               <div style={{ fontSize: 12, color: "rgb(var(--color-text-muted))", marginTop: 8 }}>
-                Le format est une expression régulière appliquée au matricule en majuscules, sans espace ni tiret
-                (ex. <code>{"[A-Z]\\d{4}"}</code> = 1 lettre + 4 chiffres, <code>{"\\d{5,8}"}</code> = 5 à 8 chiffres). Il est contrôlé à
-                l&apos;inscription, à l&apos;ajout et à l&apos;import du référentiel.
+                Employeurs du plus récent (en haut) au plus ancien (en bas).
               </div>
             )}
           </div>
@@ -684,20 +672,19 @@ function EditorModal({
 }
 
 // -----------------------------------------------------------------------------
-// Règle « matricule à format variable » : un format par employeur, édité dans la liste « Employeurs du groupe ».
-// Le format est une expression régulière appliquée au matricule normalisé (majuscules, sans espace ni tiret).
+// Longueur des matricules : un intervalle COMMUN à toutes les entités du groupe, réglé au-dessus
+// de la liste « Employeurs du groupe ». Le serveur (app/services/matricule_format.py) reste seul juge.
 // -----------------------------------------------------------------------------
 
-type EmployeurFormat = { id: string; code: string; name: string; matricule_format?: string | null; matricule_exemple?: string | null };
-
-function testFormat(pattern: string, value: string): boolean | null {
-  if (!pattern.trim() || !value.trim()) return null;
-  try {
-    const norm = value.toUpperCase().replace(/[\s\-_./]/g, "");
-    return new RegExp(`^(?:${pattern.trim()})$`, "i").test(norm);
-  } catch {
-    return null;
+/** Message d'erreur si l'intervalle saisi est incohérent, sinon null */
+function matriculeLengthProblem(min: string, max: string): string | null {
+  for (const [v, nom] of [[min, "minimum"], [max, "maximum"]] as const) {
+    if (v.trim() && !(Number.isInteger(Number(v)) && Number(v) >= 1 && Number(v) <= 64))
+      return `Le nombre ${nom} de caractères doit être un entier entre 1 et 64.`;
   }
+  if (min.trim() && max.trim() && Number(min) > Number(max))
+    return "Le nombre minimum de caractères ne peut pas dépasser le maximum.";
+  return null;
 }
 
 // -----------------------------------------------------------------------------

@@ -183,7 +183,8 @@ class Employeur(Base):
     code: Mapped[str] = mapped_column(String(32), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     boite_postale: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    # Règle « matricule à format variable » : expression régulière sur le matricule normalisé + exemple affiché
+    # Anciennes règles de matricule par employeur : colonnes conservées, plus utilisées.
+    # La longueur des matricules est désormais COMMUNE au groupe (config de la liste « Employeurs du groupe »).
     matricule_format: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     matricule_exemple: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)

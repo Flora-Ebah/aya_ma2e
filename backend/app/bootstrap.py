@@ -65,6 +65,8 @@ AUDIT_LATE_ENUM_VALUES = ["referentiel_added", "referentiel_updated", "referenti
 DOSSIERS_LATE_DDL = [
     "ALTER TABLE employeurs ADD COLUMN IF NOT EXISTS matricule_format VARCHAR(120)",
     "ALTER TABLE employeurs ADD COLUMN IF NOT EXISTS matricule_exemple VARCHAR(64)",
+    # Longueur des matricules commune au groupe, portée par la liste « Employeurs du groupe »
+    "ALTER TABLE reference_lists ADD COLUMN IF NOT EXISTS config JSONB NOT NULL DEFAULT '{}'::jsonb",
     "ALTER TABLE dossiers ADD COLUMN IF NOT EXISTS societaire_id UUID REFERENCES societaires(id) ON DELETE SET NULL",
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_dossiers_societaire_id ON dossiers (societaire_id)",
 ]

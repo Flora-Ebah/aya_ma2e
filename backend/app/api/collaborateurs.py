@@ -28,7 +28,7 @@ from app.core.database import get_db
 from app.core.tenancy import AuthContext, get_auth_context
 from app.models import AuditAction, AuditLog, Collaborateur, Employeur, Societaire, User, UserRole
 from app.services import audit_service
-from app.services.matricule_format import validate_for_employeur
+from app.services.matricule_format import load_rule, validate as validate_matricule
 from app.services.societaire_import import norm_matricule
 
 router = APIRouter(prefix="/api/collaborateurs", tags=["collaborateurs"])
@@ -461,15 +461,10 @@ async def create_collaborateur(
             status_code=409,
             detail=f"Le matricule {payload.matricule} existe déjà pour {payload.employeur_code}.",
         )
-    # Règle « matricule à format variable » : le format de l'employeur du matricule s'applique
-    emp = (await db.execute(
-        select(Employeur).where(Employeur.tenant_id == tenant_id,
-                                func.upper(Employeur.code) == payload.employeur_code.strip().upper())
-    )).scalar_one_or_none()
-    if emp is not None:
-        msg = validate_for_employeur(payload.matricule, emp.code, emp.matricule_format, emp.matricule_exemple)
-        if msg:
-            raise HTTPException(status_code=422, detail=msg)
+    # Longueur des matricules : intervalle commun à toutes les entités du groupe
+    msg = validate_matricule(payload.matricule, await load_rule(db, tenant_id))
+    if msg:
+        raise HTTPException(status_code=422, detail=msg)
     row = Collaborateur(
         tenant_id=tenant_id,
         matricule=payload.matricule.strip(),

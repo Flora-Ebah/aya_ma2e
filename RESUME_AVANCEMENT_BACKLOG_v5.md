@@ -44,12 +44,13 @@ Les scripts sont rejouables et n'écrasent pas un message personnalisé dans le 
 
 ## Tâche 06 — matricule à format variable
 
-- Chaque employeur peut avoir un **format de matricule** (expression régulière + exemple), géré dans *Listes de valeurs → Employeurs du groupe → Éditer* (sous chaque employeur : format, exemple et champ de test). Colonnes `employeurs.matricule_format` / `matricule_exemple`, créées au démarrage (`bootstrap`).
-- Le format s'applique au matricule **normalisé** (majuscules, sans espace/tiret) et doit correspondre en entier. Sans format : aucun contrôle (comportement d'avant).
-- Appliqué : ajout unitaire au référentiel (422), import CSV/XLSX du référentiel (ligne rejetée avec message), chat d'inscription (matricule absent du référentiel et ne respectant aucun format → on redemande, avec des exemples).
-- Consultation / mise à jour : un matricule numérique est retrouvé malgré les zéros de tête (`6` = `06` = `00006`) ; en cas de doublon la réponse « ambigu » est conservée.
-- Format refusé à l'enregistrement s'il est invalide, trop long ou à risque (quantificateurs imbriqués) ; l'exemple doit respecter le format.
-- Non fait : la règle n'est pas appliquée à l'import de la base MA2E (Perfect Vision) ni à la modification d'un matricule existant.
+- **Longueur des matricules commune à toutes les entités du groupe** : nombre de caractères **minimum / maximum** (ex. entre 3 et 5), réglé par l'admin au-dessus de la liste dans *Listes de valeurs → Employeurs du groupe → Éditer*. Matricules alphanumériques ou entièrement numériques, sans distinction. Stocké dans `reference_lists.config` de cette liste (bootstrap) ; changement journalisé dans l'audit. Les anciennes règles par employeur (expression régulière, exemple) ne sont plus utilisées.
+- Contrôle sur le matricule **normalisé** (majuscules, sans espace/tiret), zéros de tête comptés. Sans intervalle : aucun contrôle.
+- Appliqué : ajout unitaire au référentiel (422), import du référentiel (ligne rejetée avec message), chat d'inscription (matricule hors référentiel de mauvaise longueur → on redemande), import de la base MA2E (**avertissement** dans le rapport, le sociétaire est importé quand même).
+- Intervalle refusé à l'enregistrement si min > max ou hors 1–64.
+- Liste « Employeurs du groupe » : du **plus récent (en haut) au plus ancien (en bas)** (date d'ajout par employeur) ; CIPREL ajouté. Ajouter un employeur à la liste le crée dans la table des employeurs ; le retirer le **désactive** (jamais supprimé).
+- Consultation / mise à jour : un matricule numérique est retrouvé malgré les zéros de tête (`6` = `06` = `00006`).
+- Le matricule d'un collaborateur existant n'est pas modifiable dans l'application (pas de contrôle à ajouter).
 
 ## Reste à faire
 

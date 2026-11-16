@@ -34,6 +34,8 @@ class ItemIn(BaseModel):
     code: Optional[str] = None
     label: str
     synonyms: List[str] = Field(default_factory=list)
+    # Date d'ajout (liste « Employeurs du groupe ») : renvoyée telle quelle pour les items existants
+    added_at: Optional[str] = Field(default=None, max_length=40)
 
 
 class ReferenceListOut(BaseModel):
@@ -45,6 +47,8 @@ class ReferenceListOut(BaseModel):
     items: List[Dict[str, Any]]
     is_system: bool
     allow_other: bool
+    # « Employeurs du groupe » : {"matricule_min_len": 3, "matricule_max_len": 5}
+    config: Dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
 
@@ -64,6 +68,10 @@ class UpdateIn(BaseModel):
     aliases: Optional[List[str]] = None
     items: Optional[List[ItemIn]] = None
     allow_other: Optional[bool] = None
+    # Liste « Employeurs du groupe » uniquement : longueur des matricules commune au groupe.
+    # Absent = inchangé ; null = pas de limite.
+    matricule_min_len: Optional[int] = None
+    matricule_max_len: Optional[int] = None
 
 
 def _to_out(rl) -> ReferenceListOut:
@@ -76,6 +84,7 @@ def _to_out(rl) -> ReferenceListOut:
         items=list(rl.items or []),
         is_system=rl.is_system,
         allow_other=rl.allow_other,
+        config=dict(rl.config or {}),
         created_at=rl.created_at.isoformat(),
         updated_at=rl.updated_at.isoformat(),
     )
@@ -91,6 +100,8 @@ async def list_lists(
     # Garantit que les listes système sont présentes même si on a oublié le
     # seed au boot (dev, ancien backup, nouveau tenant…).
     await reference_list_service.seed_system_lists(db, tenant_id)
+    # « Employeurs du groupe » : datation des items + CIPREL, une seule fois (sans effet ensuite)
+    await reference_list_service.ensure_employeurs_chronology(db, tenant_id)
     rows = await reference_list_service.list_lists(db, tenant_id)
     return [_to_out(r) for r in rows]
 
@@ -125,6 +136,10 @@ async def update_list(
 ):
     _require_admin(ctx)
     tenant_id = await get_default_tenant_id(db)
+    matricule_rule = None
+    if {"matricule_min_len", "matricule_max_len"} & payload.model_fields_set:
+        matricule_rule = {k: getattr(payload, k) for k in ("matricule_min_len", "matricule_max_len")
+                          if k in payload.model_fields_set}
     rl = await reference_list_service.update_list(
         db,
         tenant_id,
@@ -134,6 +149,8 @@ async def update_list(
         aliases=payload.aliases,
         items=[it.model_dump() for it in payload.items] if payload.items is not None else None,
         allow_other=payload.allow_other,
+        matricule_rule=matricule_rule,
+        actor_id=ctx.user_id,
     )
     return _to_out(rl)
 

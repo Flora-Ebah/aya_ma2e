@@ -126,8 +126,8 @@ async def verify_matricule_referentiel(
         # le format d'un des employeurs (sinon c'est une faute de frappe, pas un sociétaire hors référentiel).
         tenant_id = context.get("_tenant_id")
         if tenant_id:
-            from app.services.matricule_format import known_format_error, load_formats
-            erreur = known_format_error(matricule, await load_formats(db, UUID(str(tenant_id)), only_active=True))
+            from app.services.matricule_format import chat_error, load_rule
+            erreur = chat_error(matricule, await load_rule(db, UUID(str(tenant_id))))
             if erreur:
                 logger.info("Matricule %s : format inconnu", matricule)
                 return ActionResult(branch_key="not_found", message=erreur)

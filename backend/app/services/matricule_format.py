@@ -1,88 +1,99 @@
-"""Règle de gestion « matricule à format variable » (backlog v5, tâche 06).
+"""Règle de gestion « longueur des matricules » (backlog v5, tâche 06).
 
-Chaque employeur du groupe a sa propre structure de matricule (longueur, lettres, chiffres…).
-L'administrateur la décrit par une EXPRESSION RÉGULIÈRE sur le matricule *normalisé* :
-majuscules, sans espace, tiret, point, barre ni underscore (« a-12 34 » est contrôlé comme « A1234 »).
-Sans format défini, l'employeur n'est soumis à aucun contrôle (comportement antérieur).
+Les matricules des entités du groupe ERANOVE sont alphanumériques ou entièrement numériques.
+L'administrateur fixe UN intervalle de longueur COMMUN à toutes les entités (ex. entre 3 et 5
+caractères), dans Listes de valeurs → Employeurs du groupe. Il est stocké dans la `config`
+de cette liste : {"matricule_min_len": 3, "matricule_max_len": 5}.
+
+Le contrôle porte sur le matricule *normalisé* : majuscules, sans espace, tiret, point,
+barre ni underscore (« a-12 34 » compte 5 caractères). Les zéros de tête comptent.
+Sans intervalle défini : aucun contrôle (comportement antérieur).
 """
 from __future__ import annotations
 
-import re
+from dataclasses import dataclass
 from typing import Optional
 from uuid import UUID
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.societaire_import import norm_matricule
 
-MAX_PATTERN_LEN = 120
-MAX_MATRICULE_LEN = 64
-# Quantificateur appliqué à un groupe qui en contient déjà un : (a+)+ , (\w*)* … (explosion combinatoire)
-_NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*[+*{]")
+MAX_LEN = 64
+EMPLOYEURS_KEY = "employeurs"
 
 
-def check_pattern(pattern: Optional[str]) -> Optional[str]:
-    """Normalise le format saisi. Retourne None si vide ; lève ValueError (message FR) si inutilisable."""
-    p = (pattern or "").strip()
-    if not p:
-        return None
-    if len(p) > MAX_PATTERN_LEN:
-        raise ValueError(f"Format trop long ({MAX_PATTERN_LEN} caractères maximum).")
-    if _NESTED_QUANTIFIER.search(p):
-        raise ValueError("Format refusé : quantificateurs imbriqués (risque de blocage). Simplifiez l'expression.")
-    try:
-        re.compile(p)
-    except re.error as e:
-        raise ValueError(f"Expression régulière invalide : {e}.")
-    return p
+@dataclass(frozen=True)
+class MatriculeRule:
+    min_len: Optional[int] = None
+    max_len: Optional[int] = None
+
+    @property
+    def is_set(self) -> bool:
+        return bool(self.min_len or self.max_len)
+
+    def describe(self) -> str:
+        """Ex. « entre 3 et 5 caractères »."""
+        lo, hi = self.min_len, self.max_len
+        if lo and hi:
+            return f"{lo} caractère{'s' if lo > 1 else ''}" if lo == hi else f"entre {lo} et {hi} caractères"
+        if lo:
+            return f"au moins {lo} caractère{'s' if lo > 1 else ''}"
+        if hi:
+            return f"au plus {hi} caractère{'s' if hi > 1 else ''}"
+        return ""
 
 
-def matches(pattern: Optional[str], matricule: str) -> bool:
-    """Vrai si le matricule (normalisé) correspond ENTIÈREMENT au format ; sans format : toujours vrai."""
-    if not pattern:
+def check_rule(min_len: Optional[int], max_len: Optional[int]) -> None:
+    """Lève ValueError (message FR) si l'intervalle est incohérent."""
+    for v, nom in ((min_len, "minimum"), (max_len, "maximum")):
+        if v is not None and not (1 <= v <= MAX_LEN):
+            raise ValueError(f"Le nombre {nom} de caractères doit être compris entre 1 et {MAX_LEN}.")
+    if min_len and max_len and min_len > max_len:
+        raise ValueError("Le nombre minimum de caractères ne peut pas dépasser le maximum.")
+
+
+def rule_from_config(config: Optional[dict]) -> MatriculeRule:
+    """Règle lue depuis la config de la liste ; une valeur corrompue est ignorée (jamais d'exception)."""
+    cfg = config or {}
+
+    def _int(k: str) -> Optional[int]:
+        v = cfg.get(k)
+        return v if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= MAX_LEN else None
+
+    return MatriculeRule(min_len=_int("matricule_min_len"), max_len=_int("matricule_max_len"))
+
+
+def matches(rule: Optional[MatriculeRule], matricule: str) -> bool:
+    """Vrai si la longueur du matricule (normalisé) est dans l'intervalle ; sans règle : toujours vrai."""
+    if rule is None or not rule.is_set:
         return True
-    norm = norm_matricule(matricule)
-    if not norm or len(norm) > MAX_MATRICULE_LEN:
+    n = len(norm_matricule(matricule) or "")
+    if not n:
         return False
-    try:
-        return re.fullmatch(pattern, norm, re.IGNORECASE) is not None
-    except re.error:
-        return False
+    return not (rule.min_len and n < rule.min_len) and not (rule.max_len and n > rule.max_len)
 
 
-def error_message(code: str, matricule: str, exemple: Optional[str]) -> str:
-    base = f"Le matricule « {matricule} » ne respecte pas le format des matricules {code}"
-    return base + (f" (exemple : {exemple})." if exemple else ".")
+def error_message(matricule: str, rule: MatriculeRule) -> str:
+    return f"Le matricule « {matricule} » doit comporter {rule.describe()} (règle commune aux entités du groupe)."
 
 
-def validate_for_employeur(matricule: str, code: str, pattern: Optional[str], exemple: Optional[str]) -> Optional[str]:
+def validate(matricule: str, rule: Optional[MatriculeRule]) -> Optional[str]:
     """None si valide, sinon le message d'erreur à afficher."""
-    return None if matches(pattern, matricule) else error_message(code, matricule, exemple)
+    return None if matches(rule, matricule) else error_message(matricule, rule)
 
 
-async def load_formats(db: AsyncSession, tenant_id: UUID, only_active: bool = False) -> dict[str, tuple[str, Optional[str]]]:
-    """{code_employeur: (format, exemple)} pour les employeurs qui ont un format défini."""
-    from app.models import Employeur
+async def load_rule(db: AsyncSession, tenant_id: UUID) -> MatriculeRule:
+    """Intervalle commun, lu dans la liste « Employeurs du groupe » du tenant."""
+    from app.services.reference_list_service import get_list_by_key
 
-    stmt = select(Employeur).where(Employeur.tenant_id == tenant_id, Employeur.matricule_format.is_not(None))
-    if only_active:
-        stmt = stmt.where(Employeur.is_active.is_(True))
-    return {
-        e.code.upper(): (e.matricule_format, e.matricule_exemple)
-        for e in (await db.execute(stmt)).scalars()
-        if (e.matricule_format or "").strip()
-    }
+    rl = await get_list_by_key(db, tenant_id, EMPLOYEURS_KEY)
+    return rule_from_config(getattr(rl, "config", None) if rl is not None else None)
 
 
-def known_format_error(matricule: str, formats: dict[str, tuple[str, Optional[str]]]) -> Optional[str]:
-    """Pour la saisie dans le chat, où l'employeur n'est pas encore connu : le matricule doit
-    respecter AU MOINS UN des formats configurés. None si aucun format n'est configuré ou si l'un convient."""
-    if not formats or any(matches(p, matricule) for p, _ in formats.values()):
+def chat_error(matricule: str, rule: MatriculeRule) -> Optional[str]:
+    """Message du chat quand le matricule saisi n'a pas la bonne longueur (None sinon)."""
+    if matches(rule, matricule):
         return None
-    exemples = [f"{code} : {ex}" for code, (_, ex) in sorted(formats.items()) if ex]
-    msg = "❌ Ce matricule ne correspond à aucun format connu."
-    if exemples:
-        msg += "\nExemples de matricules : " + " · ".join(exemples) + "."
-    return msg + "\nVérifiez votre saisie et réessayez."
-
+    return (f"❌ Ce matricule ne correspond pas au format attendu : il doit comporter {rule.describe()}.\n"
+            "Vérifiez votre saisie et réessayez.")

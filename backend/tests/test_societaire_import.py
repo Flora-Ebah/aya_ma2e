@@ -20,6 +20,7 @@ import io
 import os
 import sys
 from datetime import date, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -128,6 +129,8 @@ class _FakeDB:
 
     async def execute(self, stmt):
         if isinstance(stmt, Select):
+            if "reference_lists" in str(stmt):  # longueur des matricules : aucune règle configurée ici
+                return SimpleNamespace(scalar_one_or_none=lambda: None)
             return _FakeResult([(i,) for i in self.existing_ids])
         self.inserts.append(stmt)
         return _FakeResult([])
