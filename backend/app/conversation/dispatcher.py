@@ -135,6 +135,12 @@ async def dispatch(
 
     async def _render_menu() -> BotReply:
         active_wfs = await workflow_executor.list_active_workflows(db)
+        # Un parcours « chat / FAQ » actif porterait le même libellé que l'entrée
+        # « Poser une question libre » ajoutée ci-dessous : on ne l'affiche pas deux fois.
+        active_wfs = [
+            w for w in active_wfs
+            if workflow_executor._short_label(w.name) != "Poser une question libre"
+        ]
         if not active_wfs:
             return BotReply(text="Posez votre question, je vais y répondre à partir des informations MA2E.")
         lines = [
